@@ -1,5 +1,5 @@
 {
-  "name": "pi-custom-provider",
+  "name": "@d4rw1nz/pi-custom-provider",
   "version": "1.0.0",
   "description": "Interactive wizard to manage custom LLM providers and models for the pi coding agent",
   "keywords": ["pi-package", "pi-extension", "pi", "llm", "provider", "models", "coding-agent"],
