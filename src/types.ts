@@ -17,6 +17,7 @@ export interface ModelConfig {
   id: string; name?: string; api?: ModelAPI; reasoning?: boolean;
   thinkingLevelMap?: ThinkingLevelMap; input?: string[];
   contextWindow?: number; maxTokens?: number; cost?: ModelCost;
+  compat?: Record<string, unknown>;
 }
 
 export interface ProviderConfig {
