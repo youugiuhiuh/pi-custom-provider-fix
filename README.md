@@ -9,13 +9,13 @@ Run the `provider-setup` command inside Pi to configure an endpoint, discover it
 Install for your user account:
 
 ```bash
-pi install npm:pi-custom-provider
+pi install npm:@d4rw1nz/pi-custom-provider
 ```
 
 Or add it to the current project's Pi configuration:
 
 ```bash
-pi install -l npm:pi-custom-provider
+pi install -l npm:@d4rw1nz/pi-custom-provider
 ```
 
 Restart Pi if it is already running, then run:
@@ -27,7 +27,7 @@ Restart Pi if it is already running, then run:
 To try the package for a single run without saving it to your Pi settings:
 
 ```bash
-pi -e npm:pi-custom-provider
+pi -e npm:@d4rw1nz/pi-custom-provider
 ```
 
 ## What it does
