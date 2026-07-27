@@ -1,1 +1,0 @@
-import { handleWizardInput } from './src/wizard'; console.log('test ready')
