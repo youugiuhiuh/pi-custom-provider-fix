@@ -4,7 +4,8 @@ import * as path from "node:path";
 import * as os from "node:os";
 import type { ModelsConfig, ProviderConfig } from "./types";
 
-const MODELS_CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "models.json");
+const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+const MODELS_CONFIG_PATH = path.join(PI_AGENT_DIR, "models.json");
 
 export function readConfig(): ModelsConfig {
   try {

@@ -114,8 +114,9 @@ function assert(cond: boolean, msg: string) { if (!cond) { console.log(`FAIL: ${
   assert(s.discoveredModels[0].selected === true, "space toggles selection in filter mode");
 
   // Enter exits filter mode
-  handleWizardInput(s, mockEnter());
+  const filterAction = handleWizardInput(s, mockEnter());
   assert(s.modelFiltering === false, "enter exits filter mode");
+  assert(filterAction?.type === "render", "exiting a filter does not save configuration");
 }
 
 // ─── Test 8: Space toggle outside filter ────────────────────────
@@ -126,6 +127,20 @@ function assert(cond: boolean, msg: string) { if (!cond) { console.log(`FAIL: ${
   s.modelCursor = 0;
   handleWizardInput(s, " ");
   assert(s.discoveredModels[0].selected === true, "space toggles selection");
+}
+
+// ─── Test 11: Model editor configures compat without JSON ────────
+{
+  const s = createWizardState([]);
+  s.step = "edit_model"; s.editingModelIdx = 0; s.editFieldIdx = 6;
+  s.discoveredModels = [{ id: "m1", name: "m1", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 16384, selected: true, edited: false }];
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "edit_compat", "opens compatibility editor");
+  handleWizardInput(s, "\x1b[C");
+  handleWizardInput(s, mockEnter());
+  s.editFieldIdx = 0;
+  handleWizardInput(s, mockEnter());
+  assert(s.discoveredModels[0].compat?.supportsStore === true, "saves compatibility toggle without JSON");
 }
 
 // ─── Test 9: Delete model in edit mode ───────────────────────────

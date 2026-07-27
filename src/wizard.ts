@@ -3,7 +3,7 @@ import { Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Theme, ThinkingLevelMap } from "@earendil-works/pi-coding-agent";
 import type { ModelAPI, ModelCost } from "./types";
 
-export type WizardStep = "choose_provider" | "api_type" | "base_url" | "api_key" | "provider_id" | "discovering" | "select_models" | "edit_model" | "review" | "manage_config";
+export type WizardStep = "choose_provider" | "api_type" | "base_url" | "api_key" | "provider_id" | "discovering" | "select_models" | "edit_model" | "edit_compat" | "review" | "manage_config";
 
 export interface WizardModelItem { id: string; name: string; reasoning: boolean; input: string[]; contextWindow: number; maxTokens: number; cost?: ModelCost; thinkingLevelMap?: ThinkingLevelMap; compat?: Record<string, unknown>; selected: boolean; edited: boolean }
 
@@ -15,7 +15,7 @@ export interface WizardState {
   selectModelsFrom: "discover" | "edit_models"; addingCustom: boolean; discoveryStatus: string; discoveryLoading: boolean;
   editingModelIdx: number; editFieldIdx: number; editContextWindow: string; editMaxTokens: string;
   editReasoning: number; editImageInput: number; editCostInput: string; editCostOutput: string;
-  editCompat: string; editThinkingMap: string;
+  editCompat: string; editThinkingMap: string; compatFieldIdx: number; compatDraft: Record<string, unknown>;
   statusMessage: string; statusType: "info" | "success" | "error" | "";
 }
 
@@ -23,6 +23,45 @@ export interface WizardAction { type: string; payload?: unknown }
 
 const APIS: ModelAPI[] = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai", "mistral-conversations", "azure-openai-responses", "openai-codex-responses", "bedrock-converse-stream", "google-vertex"];
 const AL: Record<string, string> = { "openai-completions": "OpenAI Chat Completions [Key]", "openai-responses": "OpenAI Responses [Key]", "anthropic-messages": "Anthropic Messages [Key]", "google-generative-ai": "Google Generative AI [Key]", "mistral-conversations": "Mistral Conversations [Key]", "azure-openai-responses": "Azure OpenAI Responses [Key]", "openai-codex-responses": "OpenAI Codex Responses [OAuth]", "bedrock-converse-stream": "Amazon Bedrock [AWS]", "google-vertex": "Google Vertex AI [OAuth]" };
+
+type CompatControl = { key: string; label: string; values: Array<boolean | string | undefined> };
+const BOOL: Array<boolean | undefined> = [undefined, true, false];
+const OPENAI_COMPAT: CompatControl[] = [
+  { key: "supportsStore", label: "Store requests", values: BOOL },
+  { key: "supportsDeveloperRole", label: "Developer role", values: BOOL },
+  { key: "supportsReasoningEffort", label: "Reasoning effort", values: BOOL },
+  { key: "supportsUsageInStreaming", label: "Streaming usage", values: BOOL },
+  { key: "maxTokensField", label: "Max tokens field", values: [undefined, "max_tokens", "max_completion_tokens"] },
+  { key: "requiresToolResultName", label: "Tool result name", values: BOOL },
+  { key: "requiresAssistantAfterToolResult", label: "Assistant after tool", values: BOOL },
+  { key: "requiresThinkingAsText", label: "Thinking as text", values: BOOL },
+  { key: "requiresReasoningContentOnAssistantMessages", label: "Reasoning content replay", values: BOOL },
+  { key: "thinkingFormat", label: "Thinking format", values: [undefined, "openai", "openrouter", "together", "deepseek", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"] },
+  { key: "cacheControlFormat", label: "Cache control", values: [undefined, "anthropic"] },
+  { key: "supportsOpenAIGrammarTools", label: "OpenAI grammar tools", values: BOOL },
+  { key: "supportsStrictMode", label: "Strict tool schema", values: BOOL },
+  { key: "sendSessionAffinityHeaders", label: "Session affinity headers", values: BOOL },
+  { key: "sessionAffinityFormat", label: "Session affinity format", values: [undefined, "openai", "openai-nosession", "openrouter"] },
+  { key: "deferredToolsMode", label: "Deferred tools mode", values: [undefined, "kimi"] },
+  { key: "supportsLongCacheRetention", label: "Long cache retention", values: BOOL },
+];
+const ANTHROPIC_COMPAT: CompatControl[] = [
+  { key: "supportsEagerToolInputStreaming", label: "Eager tool input streaming", values: BOOL },
+  { key: "supportsCacheControlOnTools", label: "Cache control on tools", values: BOOL },
+  { key: "supportsTemperature", label: "Temperature", values: BOOL },
+  { key: "forceAdaptiveThinking", label: "Adaptive thinking", values: BOOL },
+  { key: "allowEmptySignature", label: "Allow empty signature", values: BOOL },
+  { key: "supportsStrictTools", label: "Strict tool schema", values: BOOL },
+  { key: "supportsToolReferences", label: "Tool references", values: BOOL },
+  { key: "supportsLongCacheRetention", label: "Long cache retention", values: BOOL },
+  { key: "sendSessionAffinityHeaders", label: "Session affinity headers", values: BOOL },
+];
+function compatControls(api: ModelAPI): CompatControl[] {
+  if (api === "anthropic-messages") return ANTHROPIC_COMPAT;
+  if (api === "openai-responses" || api === "openai-codex-responses") return [...OPENAI_COMPAT, { key: "supportsToolSearch", label: "Native tool search", values: BOOL }];
+  return OPENAI_COMPAT;
+}
+function compatValue(v: unknown): string { return v === undefined ? "Auto" : v === true ? "Yes" : v === false ? "No" : String(v); }
 
 type Th = ReturnType<typeof mkTh>;
 function mkTh(t: Theme) { return { dim: (s: string) => t.fg("dim", s), muted: (s: string) => t.fg("muted", s), accent: (s: string) => t.fg("accent", s), success: (s: string) => t.fg("success", s), error: (s: string) => t.fg("error", s), warning: (s: string) => t.fg("warning", s), bold: (s: string) => t.bold(s) } }
@@ -37,7 +76,7 @@ export function createWizardState(existing: Array<{ id: string; modelCount: numb
     selectModelsFrom: "discover", addingCustom: false, discoveryStatus: "", discoveryLoading: false,
     editingModelIdx: -1, editFieldIdx: 0, editContextWindow: "", editMaxTokens: "",
     editReasoning: 0, editImageInput: 0, editCostInput: "", editCostOutput: "",
-    editCompat: "", editThinkingMap: "",
+    editCompat: "", editThinkingMap: "", compatFieldIdx: 0, compatDraft: {},
     statusMessage: "", statusType: "",
   };
 }
@@ -64,6 +103,7 @@ export function renderWizard(s: WizardState, w: number, t: Theme): string[] {
     case "api_key": rKey(s, wr, th); break;
     case "provider_id": rPid(s, wr, th); break;
     case "edit_model": rEdit(s, wr, th); break;
+    case "edit_compat": rCompat(s, wr, th); break;
     case "review": rRev(s, wr, th); break;
     case "manage_config": rCfg(s, wr, th); break;
   }
@@ -81,6 +121,7 @@ function footer(s: WizardState, th: Th): string {
     discovering: "...",
     select_models: "Enter: save  |  Space: toggle  |  n: add custom  |  /: filter  |  d: delete  |  e: edit  |  Esc: back",
     edit_model: "Arrows: field  |  L/R: toggle  |  type: edit  |  Enter: save  |  Esc: cancel",
+    edit_compat: "Arrows: select  |  L/R: change  |  Enter: save  |  Esc: back",
     review: "Enter: save  |  Esc: back",
     manage_config: "Arrows: field  |  L/R: toggle  |  Enter: save  |  Esc: back",
   };
@@ -131,7 +172,19 @@ function rEdit(s: WizardState, w: (t: string) => void, th: Th) {
   fl("Reasoning", s.editReasoning ? "Yes" : "No", true, 0); fl("Image Input", s.editImageInput ? "Yes" : "No", true, 1);
   fl("Context Window", s.editContextWindow || String(m.contextWindow), false, 2); fl("Max Tokens", s.editMaxTokens || String(m.maxTokens), false, 3);
   fl("Cost ($/M in)", s.editCostInput || (m.cost ? String(m.cost.input) : "0"), false, 4); fl("Cost ($/M out)", s.editCostOutput || (m.cost ? String(m.cost.output) : "0"), false, 5);
-  fl("Compat (JSON)", s.editCompat || "(none)", false, 6); fl("Thinking (JSON)", s.editThinkingMap || (m.thinkingLevelMap ? JSON.stringify(m.thinkingLevelMap) : "(auto)"), false, 7);
+  fl("Compatibility", Object.keys(m.compat || {}).length ? "Configure" : "Auto", true, 6); fl("Thinking (JSON)", s.editThinkingMap || (m.thinkingLevelMap ? JSON.stringify(m.thinkingLevelMap) : "(auto)"), false, 7);
+}
+
+function rCompat(s: WizardState, w: (t: string) => void, th: Th) {
+  const fields = compatControls(s.apiType), model = s.discoveredModels[s.editingModelIdx];
+  w(th.bold(`  Compatibility: ${model?.id || s.providerId}`)); w("");
+  const start = Math.max(0, Math.min(s.compatFieldIdx - 4, Math.max(0, fields.length - 10)));
+  fields.slice(start, start + 10).forEach((field, i) => {
+    const idx = start + i, selected = idx === s.compatFieldIdx;
+    const value = compatValue(s.compatDraft[field.key]);
+    w(`${selected ? th.accent("> ") : "  "}${selected ? th.bold(field.label) : field.label}: ${th.accent(value)}${selected ? th.dim(" ←→") : ""}`);
+  });
+  w(""); w(th.muted("Auto leaves Pi's built-in behavior unchanged."));
 }
 
 function rRev(s: WizardState, w: (t: string) => void, th: Th) {
@@ -164,13 +217,14 @@ export function handleWizardInput(s: WizardState, d: string): WizardAction | nul
     case "api_key": return hKey(s, d);
     case "provider_id": return hPid(s, d);
     case "edit_model": return hEdit(s, d);
+    case "edit_compat": return hCompat(s, d);
     case "review": return (matchesKey(d, Key.enter)||d==="\r") ? { type: "save" } : null;
     case "manage_config": return hCfg(s, d);
     default: return null;
   }
 }
 
-const BACK: Record<string, string> = { api_type: "choose_provider", base_url: "api_type", api_key: "base_url", provider_id: "api_key", edit_model: "select_models", review: "select_models", manage_config: "select_models" };
+const BACK: Record<string, string> = { api_type: "choose_provider", base_url: "api_type", api_key: "base_url", provider_id: "api_key", edit_model: "select_models", edit_compat: "edit_model", review: "select_models", manage_config: "select_models" };
 
 function esc(s: WizardState): WizardAction | null {
   if (s.step === "select_models") { s.step = "choose_provider"; s.statusMessage = ""; return { type: "render" } }
@@ -196,7 +250,7 @@ function hModels(s: WizardState, d: string): WizardAction | null {
 
   if (s.modelFiltering) {
     if (matchesKey(d, Key.escape)) { s.modelFiltering = false; s.modelFilter = ""; s.modelCursor = 0; return { type: "render" } }
-    if ((matchesKey(d, Key.enter)||d==="\r")) { if(s.addingCustom){s.addingCustom=false;const id=s.modelFilter.trim()||"custom-model";s.discoveredModels.push({id,name:id,reasoning:false,input:["text"],contextWindow:128000,maxTokens:16384,selected:true,edited:true});s.modelFilter="";s.modelFiltering=false;s.modelCursor=s.discoveredModels.length-1;return{type:"discover_custom",payload:id}}s.modelFiltering=false;return{type:"save_models"}; }
+    if ((matchesKey(d, Key.enter)||d==="\r")) { if(s.addingCustom){s.addingCustom=false;const id=s.modelFilter.trim()||"custom-model";s.discoveredModels.push({id,name:id,reasoning:false,input:["text"],contextWindow:128000,maxTokens:16384,selected:true,edited:true});s.modelFilter="";s.modelFiltering=false;s.modelCursor=s.discoveredModels.length-1;return{type:"discover_custom",payload:id}}s.modelFiltering=false;return{type:"render"}; }
     if (matchesKey(d, Key.up)) { s.modelCursor = Math.max(0, s.modelCursor - 1); return { type: "render" } }
     if (matchesKey(d, Key.down)) { s.modelCursor = Math.min(total - 1, s.modelCursor + 1); return { type: "render" } }
     if (matchesKey(d, Key.backspace)) { s.modelFilter = s.modelFilter.slice(0, -1); if (!s.modelFilter) s.modelFiltering = false; s.modelCursor = 0; return { type: "render" } }
@@ -225,18 +279,53 @@ function hModels(s: WizardState, d: string): WizardAction | null {
   return null;
 }
 
-function ldEdit(s: WizardState) { const m = s.discoveredModels[s.modelCursor]; if (!m) return; s.editFieldIdx = 0; s.editReasoning = m.reasoning ? 1 : 0; s.editImageInput = m.input.includes("image") ? 1 : 0; s.editContextWindow = ""; s.editMaxTokens = ""; s.editCostInput = ""; s.editCostOutput = ""; s.editCompat = ""; s.editThinkingMap = ""; s.step = "edit_model" }
+function ldEdit(s: WizardState) { const m = s.discoveredModels[s.modelCursor]; if (!m) return; s.editFieldIdx = 0; s.editReasoning = m.reasoning ? 1 : 0; s.editImageInput = m.input.includes("image") ? 1 : 0; s.editContextWindow = ""; s.editMaxTokens = ""; s.editCostInput = ""; s.editCostOutput = ""; s.editCompat = ""; s.editThinkingMap = ""; s.compatFieldIdx = 0; s.compatDraft = { ...(m.compat || {}) }; s.step = "edit_model" }
 
 function hEdit(s: WizardState, d: string): WizardAction | null {
+  if (s.editFieldIdx === 6 && (matchesKey(d, Key.enter)||d==="\r")) { s.step = "edit_compat"; return { type: "render" } }
   if ((matchesKey(d, Key.enter)||d==="\r")) { applyE(s); s.step = "select_models"; return s.selectModelsFrom === "edit_models" ? { type: "save_models" } : { type: "render" } }
   if (matchesKey(d, Key.up)) { s.editFieldIdx = Math.max(0, s.editFieldIdx - 1); return { type: "render" } }
   if (matchesKey(d, Key.down)) { s.editFieldIdx = Math.min(7, s.editFieldIdx + 1); return { type: "render" } }
   if ((s.editFieldIdx === 0 || s.editFieldIdx === 1) && (matchesKey(d, Key.left) || matchesKey(d, Key.right))) { if (s.editFieldIdx === 0) s.editReasoning = 1 - s.editReasoning; else s.editImageInput = 1 - s.editImageInput; return { type: "render" } }
-  const nf = ["editContextWindow", "editMaxTokens", "editCostInput", "editCostOutput", "editCompat", "editThinkingMap"] as const;
-  const ni = s.editFieldIdx - 2; if (ni >= 0 && ni < nf.length) return ed(s, nf[ni], d);
+  const nf = ["editContextWindow", "editMaxTokens", "editCostInput", "editCostOutput", "editThinkingMap"] as const;
+  const ni = s.editFieldIdx === 7 ? 4 : s.editFieldIdx - 2; if (ni >= 0 && ni < nf.length) return ed(s, nf[ni], d);
   return null;
 }
-function applyE(s: WizardState) { const m = s.discoveredModels[s.editingModelIdx]; if (!m) return; m.reasoning = s.editReasoning === 1; m.input = s.editImageInput === 1 ? ["text", "image"] : ["text"]; if (s.editContextWindow) m.contextWindow = parseInt(s.editContextWindow, 10); if (s.editMaxTokens) m.maxTokens = parseInt(s.editMaxTokens, 10); if (s.editCostInput || s.editCostOutput) m.cost = { input: s.editCostInput ? parseFloat(s.editCostInput) : (m.cost?.input || 0), output: s.editCostOutput ? parseFloat(s.editCostOutput) : (m.cost?.output || 0), cacheRead: m.cost?.cacheRead || 0, cacheWrite: m.cost?.cacheWrite || 0 }; if (s.editCompat.trim()) try { m.compat = JSON.parse(s.editCompat) } catch { } if (s.editThinkingMap.trim()) try { m.thinkingLevelMap = JSON.parse(s.editThinkingMap) } catch { } m.edited = true }
+
+function hCompat(s: WizardState, d: string): WizardAction | null {
+  const fields = compatControls(s.apiType), current = fields[s.compatFieldIdx];
+  if ((matchesKey(d, Key.enter)||d==="\r")) { s.step = "edit_model"; return { type: "render" }; }
+  if (matchesKey(d, Key.up)) { s.compatFieldIdx = Math.max(0, s.compatFieldIdx - 1); return { type: "render" }; }
+  if (matchesKey(d, Key.down)) { s.compatFieldIdx = Math.min(fields.length - 1, s.compatFieldIdx + 1); return { type: "render" }; }
+  if (current && (matchesKey(d, Key.left) || matchesKey(d, Key.right))) {
+    const currentIndex = Math.max(0, current.values.findIndex(v => v === s.compatDraft[current.key]));
+    const direction = matchesKey(d, Key.right) ? 1 : -1;
+    const value = current.values[(currentIndex + direction + current.values.length) % current.values.length];
+    if (value === undefined) delete s.compatDraft[current.key]; else s.compatDraft[current.key] = value;
+    return { type: "render" };
+  }
+  return null;
+}
+function applyE(s: WizardState) {
+  const m = s.discoveredModels[s.editingModelIdx]; if (!m) return;
+  m.reasoning = s.editReasoning === 1; m.input = s.editImageInput === 1 ? ["text", "image"] : ["text"];
+  const pos = (v: string) => { const n = Number(v); return Number.isSafeInteger(n) && n > 0 ? n : undefined };
+  const cost = (v: string) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined };
+  const contextWindow = s.editContextWindow ? pos(s.editContextWindow) : undefined;
+  const maxTokens = s.editMaxTokens ? pos(s.editMaxTokens) : undefined;
+  if (contextWindow) m.contextWindow = contextWindow;
+  if (maxTokens) m.maxTokens = maxTokens;
+  if (s.editCostInput || s.editCostOutput) {
+    const input = s.editCostInput ? cost(s.editCostInput) : (m.cost?.input || 0);
+    const output = s.editCostOutput ? cost(s.editCostOutput) : (m.cost?.output || 0);
+    if (input !== undefined && output !== undefined) m.cost = { input, output, cacheRead: m.cost?.cacheRead || 0, cacheWrite: m.cost?.cacheWrite || 0 };
+  }
+  if (Object.keys(s.compatDraft).length) m.compat = { ...s.compatDraft }; else delete m.compat;
+  if (s.editCompat.trim()) try { const v = JSON.parse(s.editCompat); if (isRecord(v) && Object.values(v).every(x => typeof x === "boolean")) m.compat = v; } catch { }
+  if (s.editThinkingMap.trim()) try { const v = JSON.parse(s.editThinkingMap); if (isRecord(v) && Object.values(v).every(x => typeof x === "string" || x === null)) m.thinkingLevelMap = v as ThinkingLevelMap; } catch { }
+  m.edited = true;
+}
+function isRecord(v: unknown): v is Record<string, unknown> { return !!v && typeof v === "object" && !Array.isArray(v); }
 
 function hApi(s: WizardState, d: string): WizardAction | null { if (matchesKey(d, Key.up)) { s.apiTypeIdx = Math.max(0, s.apiTypeIdx - 1); s.apiType = APIS[s.apiTypeIdx]; return { type: "render" } } if (matchesKey(d, Key.down)) { s.apiTypeIdx = Math.min(APIS.length - 1, s.apiTypeIdx + 1); s.apiType = APIS[s.apiTypeIdx]; return { type: "render" } } if ((matchesKey(d, Key.enter)||d==="\r")) { s.step = "base_url"; return { type: "render" } } return null }
 function hUrl(s: WizardState, d: string): WizardAction | null { if ((matchesKey(d, Key.enter)||d==="\r") || matchesKey(d, Key.tab)) { if (!s.baseUrl.trim()) { s.statusMessage = "Required"; s.statusType = "error"; return { type: "render" } } s.step = "api_key"; s.statusMessage = ""; return { type: "render" } } return ed(s, "baseUrl", d) }

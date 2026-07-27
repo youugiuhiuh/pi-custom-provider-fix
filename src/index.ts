@@ -16,7 +16,7 @@ export default function(pi: ExtensionAPI) {
   });
 }
 
-function readAuthKey(id:string):string|undefined{try{const p=path.join(os.homedir(),".pi","agent","auth.json");if(!fs.existsSync(p))return;const a=JSON.parse(fs.readFileSync(p,"utf-8"));if(a[id]?.type==="api_key")return a[id].key}catch{}}
+function readAuthKey(id:string):string|undefined{try{const d=process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),".pi","agent");const p=path.join(d,"auth.json");if(!fs.existsSync(p))return;const a=JSON.parse(fs.readFileSync(p,"utf-8"));if(a[id]?.type==="api_key")return a[id].key}catch{}}
 function tri(v:boolean|undefined):number{return v===true?1:v===false?2:0}
 function compat(s:{mfDevRole:number;mfReasonEffort:number;mfStrict:number}):Record<string,boolean>|undefined{const c:Record<string,boolean>={};if(s.mfDevRole===1)c.supportsDeveloperRole=true;else if(s.mfDevRole===2)c.supportsDeveloperRole=false;if(s.mfReasonEffort===1)c.supportsReasoningEffort=true;else if(s.mfReasonEffort===2)c.supportsReasoningEffort=false;if(s.mfStrict===1)c.supportsStrictTools=true;else if(s.mfStrict===2)c.supportsStrictTools=false;return Object.keys(c).length?c:undefined}
 const IDX:Record<string,number>={"openai-completions":0,"openai-responses":1,"anthropic-messages":2,"google-generative-ai":3,"mistral-conversations":4,"azure-openai-responses":5,"openai-codex-responses":6,"bedrock-converse-stream":7,"google-vertex":8};
