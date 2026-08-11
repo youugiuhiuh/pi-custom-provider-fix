@@ -3,7 +3,7 @@ import { Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Theme, ThinkingLevelMap } from "@earendil-works/pi-coding-agent";
 import type { ModelAPI, ModelCost } from "./types";
 
-export type WizardStep = "choose_provider" | "api_type" | "base_url" | "api_key" | "provider_id" | "discovering" | "select_models" | "edit_model" | "edit_compat" | "review" | "manage_config";
+export type WizardStep = "choose_provider" | "confirm_delete_provider" | "api_type" | "base_url" | "api_key" | "provider_id" | "discovering" | "select_models" | "edit_model" | "edit_compat" | "review" | "manage_config";
 
 export interface WizardModelItem { id: string; name: string; reasoning: boolean; input: string[]; contextWindow: number; maxTokens: number; cost?: ModelCost; thinkingLevelMap?: ThinkingLevelMap; compat?: Record<string, unknown>; selected: boolean; edited: boolean }
 
@@ -96,6 +96,7 @@ export function renderWizard(s: WizardState, w: number, t: Theme): string[] {
 
   switch (s.step) {
     case "choose_provider": rChoose(s, wr, th); break;
+    case "confirm_delete_provider": rDeleteProvider(s, wr, th); break;
     case "select_models": rModels(s, wr, th); break;
     case "discovering": rDisc(s, wr, th); break;
     case "api_type": rApi(s, wr, th); break;
@@ -113,7 +114,8 @@ export function renderWizard(s: WizardState, w: number, t: Theme): string[] {
 
 function footer(s: WizardState, th: Th): string {
   const m: Record<string, string> = {
-    choose_provider: "Arrows: select  |  Enter: confirm  |  Esc: quit",
+    choose_provider: "Arrows: select  |  Enter: confirm  |  d: delete  |  Esc: quit",
+    confirm_delete_provider: "Enter: delete permanently  |  Esc: cancel",
     api_type: "Arrows: navigate  |  Enter: confirm  |  Esc: back",
     base_url: "Type URL  |  Enter/Tab: next  |  Esc: back",
     api_key: "Type key  |  Tab: next  |  Esc: back",
@@ -134,6 +136,15 @@ function rChoose(s: WizardState, w: (t: string) => void, th: Th) {
   const mi = (l: string, c: boolean) => w(`${c ? th.accent("> ") : "  "}${c ? th.bold(l) : l}`);
   mi("[+] Create New Provider", s.chosenProviderIdx === -1);
   s.existingProviders.forEach((p, i) => mi(`${p.id} (${p.modelCount} models)`, s.chosenProviderIdx === i));
+}
+
+function rDeleteProvider(s: WizardState, w: (t: string) => void, th: Th) {
+  const provider = s.existingProviders.find(p => p.id === s.providerId);
+  w(th.bold(th.error("  Delete Provider?"))); w("");
+  w(`  ${th.bold(s.providerId)}`);
+  if (provider) w(th.muted(`  ${provider.modelCount} model(s) will be removed from the configuration.`));
+  w(""); w(th.error("  This cannot be undone."));
+  w(""); w(th.bold(th.error("  > Delete (Enter)")));
 }
 
 function rModels(s: WizardState, w: (t: string) => void, th: Th) {
@@ -211,6 +222,7 @@ export function handleWizardInput(s: WizardState, d: string): WizardAction | nul
   if (matchesKey(d, "ctrl+c") && s.step === "choose_provider") return { type: "close" };
   switch (s.step) {
     case "choose_provider": return hChoose(s, d);
+    case "confirm_delete_provider": return (matchesKey(d, Key.enter)||d==="\r") ? { type: "delete_provider", payload: s.providerId } : null;
     case "select_models": return hModels(s, d);
     case "api_type": return hApi(s, d);
     case "base_url": return hUrl(s, d);
@@ -224,7 +236,7 @@ export function handleWizardInput(s: WizardState, d: string): WizardAction | nul
   }
 }
 
-const BACK: Record<string, string> = { api_type: "choose_provider", base_url: "api_type", api_key: "base_url", provider_id: "api_key", edit_model: "select_models", edit_compat: "edit_model", review: "select_models", manage_config: "select_models" };
+const BACK: Record<string, string> = { confirm_delete_provider: "choose_provider", api_type: "choose_provider", base_url: "api_type", api_key: "base_url", provider_id: "api_key", edit_model: "select_models", edit_compat: "edit_model", review: "select_models", manage_config: "select_models" };
 
 function esc(s: WizardState): WizardAction | null {
   if (s.step === "select_models") { s.step = "choose_provider"; s.statusMessage = ""; return { type: "render" } }
@@ -241,6 +253,10 @@ function hChoose(s: WizardState, d: string): WizardAction | null {
     if (s.chosenProviderIdx === -1) { s.step = "api_type"; s.apiTypeIdx = 0; s.apiType = APIS[0]; s.baseUrl = ""; s.apiKey = ""; s.providerId = ""; return { type: "render" } }
     const p = s.existingProviders[s.chosenProviderIdx]; if (!p) return null;
     s.providerId = p.id; return { type: "load_models", payload: p.id };
+  }
+  if (d.toLowerCase() === "d" && s.chosenProviderIdx >= 0) {
+    const p = s.existingProviders[s.chosenProviderIdx]; if (!p) return null;
+    s.providerId = p.id; s.step = "confirm_delete_provider"; s.statusMessage = ""; return { type: "render" };
   }
   return null;
 }

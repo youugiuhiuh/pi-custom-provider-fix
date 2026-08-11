@@ -27,8 +27,8 @@ interface VertexModelsResp { models?: VertexModelResp[] }
 interface CatalogProv { id: string; name: string; api: string; models: Record<string, CatalogMod> }
 interface CatalogMod  { id: string; name: string; reasoning: boolean; modalities: { input: string[] };
   limit: { context: number; output: number };
-  cost?: { input: number; output: number; cache_read: number; cache_write: number;
-           tiers?: Array<{ input: number; output: number; cache_read: number; cache_write: number; tier: { type: string; size: number } }> } }
+  cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number;
+           tiers?: Array<{ input?: number; output?: number; cache_read?: number; cache_write?: number; tier?: { type: string; size: number } }> } }
 
 interface HealthEndpoint { url: string; headers: Record<string, string> }
 
@@ -229,10 +229,25 @@ function hints(name: string, baseUrl: string): string[] {
 function norm(v: string): string { return v.toLowerCase().replace(/[^a-z0-9]/g, "").trim(); }
 function inputFilter(input?: string[]): string[] { const r = (input || []).filter(v => v === "text" || v === "image"); return r.length ? [...new Set(r)] : ["text"]; }
 
-function toModelCost(c?: CatalogMod["cost"]): ModelCost | undefined {
+export function toModelCost(c?: CatalogMod["cost"]): ModelCost | undefined {
   if (!c) return;
-  const cost: ModelCost = { input: c.input, output: c.output, cacheRead: c.cache_read, cacheWrite: c.cache_write };
-  if (c.tiers) cost.tiers = c.tiers.filter(t => t.tier?.type === "context").map(t => ({ inputTokensAbove: t.tier.size, input: t.input, output: t.output, cacheRead: t.cache_read, cacheWrite: t.cache_write }));
+  const value = (n: number | undefined) => typeof n === "number" && Number.isFinite(n) ? n : 0;
+  const cost: ModelCost = {
+    input: value(c.input),
+    output: value(c.output),
+    cacheRead: value(c.cache_read),
+    cacheWrite: value(c.cache_write),
+  };
+  const tiers = c.tiers
+    ?.filter(t => t.tier?.type === "context" && Number.isFinite(t.tier.size))
+    .map(t => ({
+      inputTokensAbove: t.tier!.size,
+      input: value(t.input),
+      output: value(t.output),
+      cacheRead: value(t.cache_read),
+      cacheWrite: value(t.cache_write),
+    }));
+  if (tiers?.length) cost.tiers = tiers;
   return cost;
 }
 

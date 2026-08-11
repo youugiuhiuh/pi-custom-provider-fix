@@ -27,6 +27,12 @@ export function addProvider(config: ModelsConfig, id: string, provider: Provider
   return { providers: { ...config.providers, [id]: provider } };
 }
 
+export function removeProvider(config: ModelsConfig, id: string): ModelsConfig {
+  const providers = { ...config.providers };
+  delete providers[id];
+  return { providers };
+}
+
 export function exportConfig(config: ModelsConfig): string {
   return JSON.stringify(config, null, 2);
 }

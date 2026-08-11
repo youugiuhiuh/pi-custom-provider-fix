@@ -1,5 +1,7 @@
 // Test wizard state machine — run: npx tsx src/test.ts
 import { createWizardState, renderWizard, handleWizardInput } from "./wizard";
+import { removeProvider } from "./models-config";
+import { toModelCost } from "./discovery";
 import { Key } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
@@ -57,6 +59,52 @@ function assert(cond: boolean, msg: string) { if (!cond) { console.log(`FAIL: ${
   const a = handleWizardInput(s, mockEnter());
   assert(a?.type === "load_models", "selects existing provider");
   assert(a?.payload === "existing", "payload is provider id");
+}
+
+// ─── Delete provider requires confirmation ──────────────────────
+{
+  const s = createWizardState([{ id: "keep", modelCount: 1 }, { id: "remove-me", modelCount: 2 }]);
+  s.chosenProviderIdx = 1;
+  const prompt = handleWizardInput(s, "d");
+  assert(prompt?.type === "render", "delete key opens provider confirmation");
+  assert(s.step === "confirm_delete_provider", "shows provider deletion confirmation");
+  assert(s.providerId === "remove-me", "confirmation targets selected provider");
+
+  const cancel = handleWizardInput(s, mockEsc());
+  assert(cancel?.type === "render" && s.step === "choose_provider", "escape cancels provider deletion");
+
+  handleWizardInput(s, "d");
+  const confirm = handleWizardInput(s, mockEnter());
+  assert(confirm?.type === "delete_provider", "enter confirms provider deletion");
+  assert(confirm?.payload === "remove-me", "delete action includes provider id");
+}
+
+// ─── Create New cannot be deleted ───────────────────────────────
+{
+  const s = createWizardState([{ id: "existing", modelCount: 1 }]);
+  s.chosenProviderIdx = -1;
+  const a = handleWizardInput(s, "d");
+  assert(a === null && s.step === "choose_provider", "delete is ignored on Create New");
+}
+
+// ─── Provider deletion preserves other providers ────────────────
+{
+  const provider = { baseUrl: "https://example.test", api: "openai-completions" as const, models: [] };
+  const config = { providers: { keep: provider, "remove-me": provider } };
+  const result = removeProvider(config, "remove-me");
+  assert(!result.providers["remove-me"], "selected provider is removed from config");
+  assert(result.providers.keep === provider, "other providers remain in config");
+  assert(config.providers["remove-me"] === provider, "provider removal does not mutate input config");
+}
+
+// ─── Catalog pricing satisfies Pi's current schema ──────────────
+{
+  const cost = toModelCost({ input: 0.07, output: 0.14, cache_read: 0.0014 });
+  assert(cost?.cacheWrite === 0, "missing cacheWrite is normalized to zero");
+  assert(["input", "output", "cacheRead", "cacheWrite"].every(key => Object.hasOwn(cost!, key)), "normalized cost contains every required rate");
+
+  const tiered = toModelCost({ input: 1, output: 2, tiers: [{ tier: { type: "context", size: 200000 }, input: 3 }] });
+  assert(tiered?.tiers?.[0].output === 0 && tiered.tiers[0].cacheWrite === 0, "tier pricing also contains every required rate");
 }
 
 // ─── Test 6: Model list with edit_models mode ────────────────────

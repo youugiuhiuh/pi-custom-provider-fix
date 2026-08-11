@@ -44,7 +44,7 @@ The wizard supports these API types:
 
 For supported providers, it discovers models directly from the provider API. When possible, it enriches the result with model metadata from [models.dev](https://models.dev), including context limits, output limits, input modalities, reasoning support, and pricing. You can also add a model manually and edit its capabilities or limits.
 
-Existing providers can be reopened to add, edit, or remove models and to update their endpoint, authentication method, compatibility flags, and custom headers. The model editor exposes Pi compatibility options as API-aware controls (for example developer role, reasoning format, token field, strict tools, and session affinity), so common settings do not require hand-written JSON.
+Existing providers can be reopened to add, edit, or remove models and to update their endpoint, authentication method, compatibility flags, and custom headers. On the provider list, press `d` on a provider and confirm to remove the provider and all of its configured models. The model editor exposes Pi compatibility options as API-aware controls (for example developer role, reasoning format, token field, strict tools, and session affinity), so common settings do not require hand-written JSON.
 
 ## Requirements
 

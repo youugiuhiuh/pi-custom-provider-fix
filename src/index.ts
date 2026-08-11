@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ProviderConfig, ModelConfig } from "./types";
 import { usesAuthHeader } from "./types";
-import { readConfig, writeConfig, addProvider } from "./models-config";
+import { readConfig, writeConfig, addProvider, removeProvider } from "./models-config";
 import { discoverModels } from "./discovery";
 import { createWizardState, renderWizard, handleWizardInput } from "./wizard";
 import * as fs from "node:fs"; import * as path from "node:path"; import * as os from "node:os";
@@ -38,6 +38,8 @@ async function run(ctx:ExtensionContext){
 
   const saveConfig=()=>{const p=readConfig().providers[s.providerId];if(!p)return;const c=compat(s);let h:Record<string,string>|undefined;if(s.mfHeaders.trim()){try{h=JSON.parse(s.mfHeaders)}catch{s.statusMessage="Invalid JSON";s.statusType="error";return}}writeConfig(addProvider(readConfig(),s.providerId,{...p,baseUrl:s.baseUrl,api:s.apiType,apiKey:s.apiKey||p.apiKey,authHeader:s.mfAuth===2?false:s.mfAuth===1?true:undefined,compat:c,headers:h}));s.existingProviders=Object.entries(readConfig().providers).map(([id,p])=>({id,modelCount:p.models?.length||0}));s.statusMessage="Config saved.";s.statusType="success";s.step="select_models"};
 
+  const deleteProvider=(id:string)=>{const cfg=readConfig();if(!Object.prototype.hasOwnProperty.call(cfg.providers,id)){s.statusMessage=`Provider "${id}" not found`;s.statusType="error";s.step="choose_provider";return}writeConfig(removeProvider(cfg,id));s.existingProviders=Object.entries(readConfig().providers).map(([providerId,p])=>({id:providerId,modelCount:p.models?.length||0}));s.chosenProviderIdx=s.existingProviders.length?Math.min(s.chosenProviderIdx,s.existingProviders.length-1):-1;s.providerId="";s.discoveredModels=[];s.statusMessage=`Deleted provider "${id}".`;s.statusType="success";s.step="choose_provider"};
+
   await ctx.ui.custom<void>((tui,theme,_kb,done)=>{let cw=0,cl:string[]=[];const render=(w:number)=>(cl.length&&cw===w)?cl:(cw=w,cl=renderWizard(s,w,theme),cl);const refresh=()=>{cl=[];tui.requestRender()};
     function handleInput(d:string){const a=handleWizardInput(s,d);if(!a)return;
       switch(a.type){
@@ -49,6 +51,7 @@ async function run(ctx:ExtensionContext){
         case"load_config":loadConfig(a.payload as string);refresh();break;
         case"save_config":saveConfig();refresh();break;
         case"save_models":saveModels();refresh();break;
+        case"delete_provider":deleteProvider(a.payload as string);refresh();break;
         case"review":s.step="review";refresh();break;
         case"discover_custom":(async()=>{const id=a.payload as string;s.statusMessage=`Looking up ${id}...`;s.statusType="info";refresh();try{const catalog=await fetch("https://models.dev/api.json").then(r=>r.json())as Record<string,any>;let found:any;for(const prov of Object.values(catalog)){const m=(prov as any).models?.[id]||(prov as any).models?.[id.replace(/^[^\/]+\//,"")];if(m){found=m;break}}if(found){const m=s.discoveredModels.find(x=>x.id===id);if(m){m.reasoning=found.reasoning||false;m.input=found.modalities?.input||["text"];m.contextWindow=found.limit?.context||128000;m.maxTokens=found.limit?.output||16384;if(found.cost)m.cost={input:found.cost.input||0,output:found.cost.output||0,cacheRead:found.cost.cache_read||0,cacheWrite:found.cost.cache_write||0};s.statusMessage=`Filled ${id} from catalog.`}else{s.statusMessage=`Model ${id} not in catalog, using defaults.`}}else{s.statusMessage=`Model ${id} not in catalog, using defaults.`}s.statusType="success"}catch{s.statusMessage="Catalog lookup failed, using defaults.";s.statusType="warning"}refresh()})();break;
       }
