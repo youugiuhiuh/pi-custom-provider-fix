@@ -1,8 +1,16 @@
 {
   "name": "@d4rw1nz/pi-custom-provider",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Interactive wizard to manage custom LLM providers and models for the pi coding agent",
-  "keywords": ["pi-package", "pi-extension", "pi", "llm", "provider", "models", "coding-agent"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "llm",
+    "provider",
+    "models",
+    "coding-agent"
+  ],
   "license": "MIT",
   "author": "d4rw1nz",
   "repository": {
@@ -27,7 +35,9 @@
     "node": ">=22.19.0"
   },
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
