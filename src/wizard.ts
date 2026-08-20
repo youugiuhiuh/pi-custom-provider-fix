@@ -3,6 +3,7 @@ import { Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { ModelAPI, ModelCost, ThinkingLevelMap } from "./types";
 import { providerCompatKeys } from "./types";
+import { listModelPresets, type ModelPreset } from "./discovery";
 
 export type WizardStep =
   | "choose_provider"
@@ -15,6 +16,7 @@ export type WizardStep =
   | "select_models"
   | "edit_model"
   | "edit_compat"
+  | "model_preset"
   | "review"
   | "manage_config";
 
@@ -67,6 +69,12 @@ export interface WizardState {
   editThinkingMap: string;
   compatFieldIdx: number;
   compatDraft: Record<string, unknown>;
+  modelPresetCursor: number;
+  modelPresetFilter: string;
+  modelPresetFiltering: boolean;
+  modelPresetLabel: string;
+  modelPresetDraft?: ModelPreset["model"];
+  modelPresetBackStep: "edit_model" | "edit_compat";
   statusMessage: string;
   statusType: "info" | "success" | "warning" | "error" | "";
 }
@@ -233,6 +241,12 @@ export function createWizardState(existing: Array<{ id: string; modelCount: numb
     editThinkingMap: "",
     compatFieldIdx: 0,
     compatDraft: {},
+    modelPresetCursor: 0,
+    modelPresetFilter: "",
+    modelPresetFiltering: false,
+    modelPresetLabel: "Custom / saved",
+    modelPresetDraft: undefined,
+    modelPresetBackStep: "edit_model",
     statusMessage: "",
     statusType: "",
   };
@@ -288,6 +302,9 @@ export function renderWizard(s: WizardState, w: number, t: Theme): string[] {
     case "edit_compat":
       rCompat(s, wr, th);
       break;
+    case "model_preset":
+      rModelPreset(s, wr, th);
+      break;
     case "review":
       rRev(s, wr, th);
       break;
@@ -312,12 +329,18 @@ function footer(s: WizardState, th: Th): string {
     discovering: "...",
     select_models:
       "Enter: save  |  Space: toggle  |  n: add custom  |  /: filter  |  d: delete  |  e: edit  |  Esc: back",
-    edit_model: "Arrows: field  |  L/R: toggle  |  type: edit  |  Enter: save  |  Esc: cancel",
-    edit_compat: "Arrows: select  |  L/R: change  |  Enter: save  |  Esc: back",
+    edit_model: "p: choose preset  |  Arrows: field  |  L/R: toggle  |  type: edit  |  Enter: save  |  Esc: cancel",
+    edit_compat: "p: choose preset  |  x: reset  |  Arrows: select  |  L/R: change  |  Enter: save  |  Esc: back",
+    model_preset: "Arrows: select  |  /: filter  |  Enter: apply model  |  Esc: back",
     review: "Enter: save  |  Esc: back",
     manage_config: "Arrows: field  |  L/R: toggle  |  Enter: save  |  Esc: back",
   };
-  if (s.modelFiltering || s.modelFilter) return th.accent(`  ${s.modelFilter}_`) + "\n" + th.dim(m[s.step] || "");
+  if (s.step === "select_models" && (s.modelFiltering || s.modelFilter)) {
+    return th.accent(`  ${s.modelFilter}_`) + "\n" + th.dim(m[s.step] || "");
+  }
+  if (s.step === "model_preset" && s.modelPresetFiltering) {
+    return th.accent(`  ${s.modelPresetFilter}_`) + "\n" + th.dim(m[s.step] || "");
+  }
   return th.dim(m[s.step] || "");
 }
 
@@ -410,6 +433,7 @@ function rEdit(s: WizardState, w: (t: string) => void, th: Th) {
   const m = s.discoveredModels[s.editingModelIdx];
   if (!m) return;
   w(th.bold(`  Edit: ${m.id}`));
+  w(`  Preset: ${th.accent(s.modelPresetLabel)}`);
   w("");
   const fl = (l: string, v: string, t: boolean, i: number) => {
     const f = i === s.editFieldIdx;
@@ -422,7 +446,7 @@ function rEdit(s: WizardState, w: (t: string) => void, th: Th) {
   fl("Cost ($/M in)", s.editCostInput || (m.cost ? String(m.cost.input) : "0"), false, 4);
   fl("Cost ($/M out)", s.editCostOutput || (m.cost ? String(m.cost.output) : "0"), false, 5);
   const compatFields = compatControls(s.apiType);
-  const compatLabel = compatFields.length ? (Object.keys(m.compat || {}).length ? "Configure" : "Auto") : "N/A";
+  const compatLabel = compatFields.length ? (Object.keys(s.compatDraft).length ? "Configured" : "Auto") : "N/A";
   fl("Compatibility", compatLabel, compatFields.length > 0, 6);
   fl(
     "Thinking (JSON)",
@@ -441,6 +465,8 @@ function rCompat(s: WizardState, w: (t: string) => void, th: Th) {
     w(th.muted(`  ${s.apiType} has no model compat overrides in pi-ai.`));
     return;
   }
+  w(th.muted("  Press p to apply a complete pi-ai model preset, or x to reset compat."));
+  w("");
   const start = Math.max(0, Math.min(s.compatFieldIdx - 4, Math.max(0, fields.length - 10)));
   fields.slice(start, start + 10).forEach((field, i) => {
     const idx = start + i,
@@ -452,6 +478,29 @@ function rCompat(s: WizardState, w: (t: string) => void, th: Th) {
   });
   w("");
   w(th.muted("Auto leaves Pi's built-in behavior unchanged."));
+}
+
+function modelPresetChoices(s: WizardState): ModelPreset[] {
+  const model = s.discoveredModels[s.editingModelIdx];
+  return listModelPresets(s.apiType, model?.id || "", s.modelPresetFilter);
+}
+
+function rModelPreset(s: WizardState, w: (t: string) => void, th: Th) {
+  const model = s.discoveredModels[s.editingModelIdx],
+    choices = modelPresetChoices(s);
+  w(th.bold(`  Choose Model Preset: ${model?.id || s.providerId}`));
+  w(th.muted(`  ${s.apiType} · complete model metadata from installed pi-ai`));
+  w("");
+  if (!choices.length) {
+    w(th.dim("  (no matching presets)"));
+    return;
+  }
+  const start = Math.max(0, Math.min(s.modelPresetCursor - 5, Math.max(0, choices.length - 10)));
+  choices.slice(start, start + 10).forEach((preset, index) => {
+    const selected = start + index === s.modelPresetCursor;
+    const suggested = preset.recommended ? th.success(" [Suggested]") : "";
+    w(`${selected ? th.accent("> ") : "  "}${selected ? th.bold(preset.label) : preset.label}${suggested}`);
+  });
 }
 
 function rRev(s: WizardState, w: (t: string) => void, th: Th) {
@@ -499,6 +548,12 @@ function rCfg(s: WizardState, w: (t: string) => void, th: Th) {
 // ─── Input ───────────────────────────────────────────────────────
 
 export function handleWizardInput(s: WizardState, d: string): WizardAction | null {
+  if (matchesKey(d, Key.escape) && s.step === "model_preset" && s.modelPresetFiltering) {
+    s.modelPresetFiltering = false;
+    s.modelPresetFilter = "";
+    s.modelPresetCursor = 0;
+    return { type: "render" };
+  }
   if (matchesKey(d, Key.escape)) return esc(s);
   if (matchesKey(d, "ctrl+c") && s.step === "choose_provider") return { type: "close" };
   switch (s.step) {
@@ -520,6 +575,8 @@ export function handleWizardInput(s: WizardState, d: string): WizardAction | nul
       return hEdit(s, d);
     case "edit_compat":
       return hCompat(s, d);
+    case "model_preset":
+      return hModelPreset(s, d);
     case "review":
       return matchesKey(d, Key.enter) || d === "\r" ? { type: "save" } : null;
     case "manage_config":
@@ -542,6 +599,11 @@ const BACK: Record<string, string> = {
 };
 
 function esc(s: WizardState): WizardAction | null {
+  if (s.step === "model_preset") {
+    s.step = s.modelPresetBackStep;
+    s.statusMessage = "";
+    return { type: "render" };
+  }
   if (s.step === "select_models") {
     s.step = "choose_provider";
     s.statusMessage = "";
@@ -733,19 +795,24 @@ function ldEdit(s: WizardState) {
   s.editThinkingMap = "";
   s.compatFieldIdx = 0;
   s.compatDraft = { ...(m.compat || {}) };
+  s.modelPresetCursor = 0;
+  s.modelPresetFilter = "";
+  s.modelPresetFiltering = false;
+  s.modelPresetLabel = "Custom / saved";
+  s.modelPresetDraft = undefined;
+  s.modelPresetBackStep = "edit_model";
   s.step = "edit_model";
 }
 
 function hEdit(s: WizardState, d: string): WizardAction | null {
+  if (d.toLowerCase() === "p") return openModelPresetPicker(s);
   if (s.editFieldIdx === 6 && (matchesKey(d, Key.enter) || d === "\r")) {
     if (!compatControls(s.apiType).length) return { type: "render" };
     s.step = "edit_compat";
     return { type: "render" };
   }
   if (matchesKey(d, Key.enter) || d === "\r") {
-    applyE(s);
-    s.step = "select_models";
-    return s.selectModelsFrom === "edit_models" ? { type: "save_models" } : { type: "render" };
+    return saveEditedModel(s);
   }
   if (matchesKey(d, Key.up)) {
     s.editFieldIdx = Math.max(0, s.editFieldIdx - 1);
@@ -758,20 +825,30 @@ function hEdit(s: WizardState, d: string): WizardAction | null {
   if ((s.editFieldIdx === 0 || s.editFieldIdx === 1) && (matchesKey(d, Key.left) || matchesKey(d, Key.right))) {
     if (s.editFieldIdx === 0) s.editReasoning = 1 - s.editReasoning;
     else s.editImageInput = 1 - s.editImageInput;
+    s.modelPresetLabel = "Custom";
     return { type: "render" };
   }
   const nf = ["editContextWindow", "editMaxTokens", "editCostInput", "editCostOutput", "editThinkingMap"] as const;
   const ni = s.editFieldIdx === 7 ? 4 : s.editFieldIdx - 2;
-  if (ni >= 0 && ni < nf.length) return ed(s, nf[ni], d);
+  if (ni >= 0 && ni < nf.length) {
+    const action = ed(s, nf[ni], d);
+    if (action) s.modelPresetLabel = "Custom";
+    return action;
+  }
   return null;
 }
 
 function hCompat(s: WizardState, d: string): WizardAction | null {
   const fields = compatControls(s.apiType),
     current = fields[s.compatFieldIdx];
-  if (matchesKey(d, Key.enter) || d === "\r") {
-    s.step = "edit_model";
+  if (d.toLowerCase() === "p") return openModelPresetPicker(s);
+  if (d.toLowerCase() === "x") {
+    s.compatDraft = {};
+    s.modelPresetLabel = "Custom";
     return { type: "render" };
+  }
+  if (matchesKey(d, Key.enter) || d === "\r") {
+    return saveEditedModel(s);
   }
   if (matchesKey(d, Key.up)) {
     s.compatFieldIdx = Math.max(0, s.compatFieldIdx - 1);
@@ -790,13 +867,85 @@ function hCompat(s: WizardState, d: string): WizardAction | null {
     const value = current.values[(currentIndex + direction + current.values.length) % current.values.length];
     if (value === undefined) delete s.compatDraft[current.key];
     else s.compatDraft[current.key] = value;
+    s.modelPresetLabel = "Custom";
     return { type: "render" };
   }
   return null;
 }
+
+function openModelPresetPicker(s: WizardState): WizardAction {
+  s.modelPresetBackStep = s.step === "edit_compat" ? "edit_compat" : "edit_model";
+  s.modelPresetCursor = 0;
+  s.modelPresetFilter = "";
+  s.modelPresetFiltering = false;
+  s.step = "model_preset";
+  return { type: "render" };
+}
+
+function hModelPreset(s: WizardState, d: string): WizardAction | null {
+  const choices = modelPresetChoices(s);
+  if (matchesKey(d, Key.up)) {
+    s.modelPresetCursor = Math.max(0, s.modelPresetCursor - 1);
+    return { type: "render" };
+  }
+  if (matchesKey(d, Key.down)) {
+    s.modelPresetCursor = Math.min(Math.max(0, choices.length - 1), s.modelPresetCursor + 1);
+    return { type: "render" };
+  }
+  if (matchesKey(d, Key.enter) || d === "\r") {
+    const preset = choices[s.modelPresetCursor];
+    if (!preset) return null;
+    applyModelPreset(s, preset);
+    s.modelPresetCursor = 0;
+    s.modelPresetFilter = "";
+    s.modelPresetFiltering = false;
+    s.editFieldIdx = 0;
+    s.step = "edit_model";
+    return { type: "render" };
+  }
+  if (d === "/" && !s.modelPresetFiltering) {
+    s.modelPresetCursor = 0;
+    s.modelPresetFilter = "";
+    s.modelPresetFiltering = true;
+    return { type: "render" };
+  }
+  if (!s.modelPresetFiltering) return null;
+  if (matchesKey(d, Key.backspace)) {
+    s.modelPresetFilter = s.modelPresetFilter.slice(0, -1);
+    s.modelPresetCursor = 0;
+    return { type: "render" };
+  }
+  const clean = d.replace(/\x1b\[[0-9;]*[~a-zA-Z]/g, "").replace(/[\x00-\x1f\x7f]/g, "");
+  if (!clean) return null;
+  s.modelPresetFilter += clean;
+  s.modelPresetCursor = 0;
+  return { type: "render" };
+}
+
+function applyModelPreset(s: WizardState, preset: ModelPreset): void {
+  const model = preset.model;
+  s.editReasoning = model.reasoning ? 1 : 0;
+  s.editImageInput = model.input.includes("image") ? 1 : 0;
+  s.editContextWindow = String(model.contextWindow);
+  s.editMaxTokens = String(model.maxTokens);
+  s.editCostInput = model.cost ? String(model.cost.input) : "";
+  s.editCostOutput = model.cost ? String(model.cost.output) : "";
+  s.editThinkingMap = model.thinkingLevelMap ? JSON.stringify(model.thinkingLevelMap) : "";
+  s.compatDraft = { ...(model.compat || {}) };
+  s.modelPresetLabel = preset.label;
+  s.modelPresetDraft = model;
+}
+
+function saveEditedModel(s: WizardState): WizardAction {
+  applyE(s);
+  s.step = "select_models";
+  return s.selectModelsFrom === "edit_models" ? { type: "save_models" } : { type: "render" };
+}
+
 function applyE(s: WizardState) {
   const m = s.discoveredModels[s.editingModelIdx];
   if (!m) return;
+  if (s.modelPresetDraft) m.name = s.modelPresetDraft.name;
   m.reasoning = s.editReasoning === 1;
   m.input = s.editImageInput === 1 ? ["text", "image"] : ["text"];
   const pos = (v: string) => {
@@ -811,7 +960,20 @@ function applyE(s: WizardState) {
   const maxTokens = s.editMaxTokens ? pos(s.editMaxTokens) : undefined;
   if (contextWindow) m.contextWindow = contextWindow;
   if (maxTokens) m.maxTokens = maxTokens;
-  if (s.editCostInput || s.editCostOutput) {
+  if (s.modelPresetDraft) {
+    if (s.modelPresetDraft.cost) {
+      const input = cost(s.editCostInput),
+        output = cost(s.editCostOutput);
+      m.cost = {
+        ...s.modelPresetDraft.cost,
+        input: input ?? s.modelPresetDraft.cost.input,
+        output: output ?? s.modelPresetDraft.cost.output,
+        tiers: s.modelPresetDraft.cost.tiers?.map((entry) => ({ ...entry })),
+      };
+    } else {
+      delete m.cost;
+    }
+  } else if (s.editCostInput || s.editCostOutput) {
     const input = s.editCostInput ? cost(s.editCostInput) : m.cost?.input || 0;
     const output = s.editCostOutput ? cost(s.editCostOutput) : m.cost?.output || 0;
     if (input !== undefined && output !== undefined)
@@ -825,6 +987,7 @@ function applyE(s: WizardState) {
       if (isRecord(v) && Object.values(v).every((x) => typeof x === "string" || x === null))
         m.thinkingLevelMap = v as ThinkingLevelMap;
     } catch {}
+  else if (s.modelPresetDraft) delete m.thinkingLevelMap;
   m.edited = true;
 }
 function isRecord(v: unknown): v is Record<string, unknown> {

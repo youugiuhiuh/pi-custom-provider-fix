@@ -1,7 +1,7 @@
 // Test wizard state machine — run: npx tsx src/test.ts
 import { createWizardState, renderWizard, handleWizardInput } from "./wizard";
 import { mergeSelectedModels, removeProvider } from "./models-config";
-import { recommendModels, toModelCost } from "./discovery";
+import { listModelPresets, recommendModels, toModelCost } from "./discovery";
 import { Key } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -399,10 +399,85 @@ function assert(cond: boolean, msg: string) {
   handleWizardInput(s, mockEnter());
   assert(s.step === "edit_compat", "opens compatibility editor");
   handleWizardInput(s, "\x1b[C");
-  handleWizardInput(s, mockEnter());
-  s.editFieldIdx = 0;
-  handleWizardInput(s, mockEnter());
+  const save = handleWizardInput(s, mockEnter());
+  assert(save?.type === "render" && s.step === "select_models", "enter saves and exits compatibility editing");
   assert(s.discoveredModels[0].compat?.supportsStore === true, "saves compatibility toggle without JSON");
+}
+
+// ─── Complete model presets are ranked and explicitly applied ──
+{
+  const presets = listModelPresets("openai-completions", "360-deepseek-v4-flash");
+  assert(
+    presets.some((preset) => preset.modelId === "deepseek-v4-flash" && preset.recommended),
+    "vendor-prefixed model IDs suggest the matching pi-ai model preset",
+  );
+  const expected = listModelPresets("openai-completions", "360-deepseek-v4-flash", "deepseek-v4-flash")[0];
+  assert(!!expected, "the DeepSeek model preset can be filtered");
+
+  const s = createWizardState([]);
+  s.step = "select_models";
+  s.apiType = "openai-completions";
+  s.selectModelsFrom = "edit_models";
+  s.discoveredModels = [
+    {
+      id: "360-deepseek-v4-flash",
+      name: "360-deepseek-v4-flash",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128000,
+      maxTokens: 16384,
+      selected: true,
+      edited: false,
+    },
+  ];
+
+  handleWizardInput(s, "e");
+  handleWizardInput(s, "p");
+  assert(s.step === "model_preset", "p opens the complete model preset picker");
+  handleWizardInput(s, "/");
+  for (const char of "deepseek-v4-flash") handleWizardInput(s, char);
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "edit_model", "enter applies the selected preset and returns to model editing");
+  assert(s.editReasoning === (expected?.model.reasoning ? 1 : 0), "preset copies reasoning support");
+  assert(s.editImageInput === (expected?.model.input.includes("image") ? 1 : 0), "preset copies input modalities");
+  assert(s.editContextWindow === String(expected?.model.contextWindow), "preset copies the context window");
+  assert(s.editMaxTokens === String(expected?.model.maxTokens), "preset copies the output token limit");
+  assert(s.editCostInput === String(expected?.model.cost?.input ?? ""), "preset copies input pricing");
+  assert(s.editCostOutput === String(expected?.model.cost?.output ?? ""), "preset copies output pricing");
+  assert(
+    JSON.stringify(s.compatDraft) === JSON.stringify(expected?.model.compat || {}),
+    "preset copies explicit pi-ai compat values",
+  );
+  assert(
+    s.editThinkingMap === (expected?.model.thinkingLevelMap ? JSON.stringify(expected.model.thinkingLevelMap) : ""),
+    "preset copies the thinking-level map",
+  );
+  assert(s.modelPresetLabel.includes("deepseek-v4-flash"), "the applied model preset remains visible");
+
+  const save = handleWizardInput(s, mockEnter());
+  assert(save?.type === "save_models", "saving a preset writes an existing provider immediately");
+  assert(s.step === "select_models", "saving a preset returns to the model list");
+  assert(s.discoveredModels[0].id === "360-deepseek-v4-flash", "applying a preset preserves the callable model ID");
+  assert(s.discoveredModels[0].name === expected?.model.name, "saving writes the preset model name");
+  assert(s.discoveredModels[0].contextWindow === expected?.model.contextWindow, "saving writes preset limits");
+  assert(
+    JSON.stringify(s.discoveredModels[0].cost) === JSON.stringify(expected?.model.cost),
+    "saving writes the complete preset cost metadata",
+  );
+  assert(
+    JSON.stringify(s.discoveredModels[0].compat) === JSON.stringify(expected?.model.compat),
+    "saving writes preset compatibility metadata",
+  );
+
+  handleWizardInput(s, "e");
+  s.editFieldIdx = 6;
+  handleWizardInput(s, mockEnter());
+  handleWizardInput(s, "p");
+  handleWizardInput(s, mockEsc());
+  assert(s.step === "edit_compat", "escaping a preset opened from compatibility returns to compatibility");
+  handleWizardInput(s, "x");
+  handleWizardInput(s, mockEnter());
+  assert(!s.discoveredModels[0].compat, "x clears all compatibility overrides before saving");
 }
 
 // ─── Filtered model actions target the visible item ─────────────

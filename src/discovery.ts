@@ -96,6 +96,10 @@ interface HealthEndpoint {
 }
 
 interface RecommendationModel extends DiscoveredModel {
+  reasoning: boolean;
+  input: string[];
+  contextWindow: number;
+  maxTokens: number;
   catalogApi?: string;
 }
 
@@ -116,6 +120,22 @@ interface RecommendationIndex {
   providers: RecommendationProvider[];
   exact: Map<string, IndexedRecommendation[]>;
   leaf: Map<string, IndexedRecommendation[]>;
+}
+
+export interface ModelPresetModel extends DiscoveredModel {
+  reasoning: boolean;
+  input: string[];
+  contextWindow: number;
+  maxTokens: number;
+}
+
+export interface ModelPreset {
+  key: string;
+  label: string;
+  providerId: string;
+  modelId: string;
+  model: ModelPresetModel;
+  recommended: boolean;
 }
 
 // ─── Public API ──────────────────────────────────────────────────
@@ -291,6 +311,59 @@ function getPiRecommendations(): RecommendationProvider[] {
     priority: 2,
     models: provider.getModels().map(fromPiModel),
   })));
+}
+
+/** List complete pi-ai model configurations for explicit manual selection. */
+export function listModelPresets(api: ProviderConfig["api"], modelId: string, filter = ""): ModelPreset[] {
+  const query = filter.trim().toLowerCase();
+  return getPiRecommendations()
+    .flatMap((provider) =>
+      provider.models
+        .filter((model) => model.catalogApi === api)
+        .map((model) => {
+          const score = modelPresetScore(modelId, model.id);
+          const { catalogApi: _catalogApi, ...presetModel } = model;
+          return {
+            key: `${provider.id}/${model.id}`,
+            label: `${provider.id} / ${model.id}`,
+            providerId: provider.id,
+            modelId: model.id,
+            model: {
+              ...presetModel,
+              input: [...presetModel.input],
+              cost: cloneModelCost(presetModel.cost),
+              thinkingLevelMap: presetModel.thinkingLevelMap ? { ...presetModel.thinkingLevelMap } : undefined,
+              compat: presetModel.compat ? { ...presetModel.compat } : undefined,
+            },
+            recommended: score >= 700,
+            score,
+          };
+        }),
+    )
+    .filter((preset) => !query || preset.label.toLowerCase().includes(query))
+    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
+    .map(({ score: _score, ...preset }) => preset);
+}
+
+function modelPresetScore(actual: string, preset: string): number {
+  const left = normalizedModelId(actual),
+    right = normalizedModelId(preset);
+  if (left === right) return 1000;
+  if (modelLeaf(left) === modelLeaf(right)) return 900;
+  const compactLeft = norm(left),
+    compactRight = norm(right);
+  if (compactRight.length >= 6 && compactLeft.endsWith(compactRight)) return 800;
+  if (compactRight.length >= 6 && compactLeft.includes(compactRight)) return 700;
+  return 0;
+}
+
+function cloneModelCost(cost: ModelCost | undefined): ModelCost | undefined {
+  return cost
+    ? {
+        ...cost,
+        tiers: cost.tiers?.map((entry) => ({ ...entry })),
+      }
+    : undefined;
 }
 
 /** Build selectable candidates. Native ids are enriched first; URL matches only add suggestions. */
