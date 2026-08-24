@@ -83,6 +83,7 @@ export interface ModelConfig {
 }
 
 export interface ProviderConfig {
+  name?: string;
   baseUrl: string;
   api: ModelAPI;
   apiKey?: string;

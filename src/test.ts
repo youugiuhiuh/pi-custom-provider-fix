@@ -1,6 +1,6 @@
 // Test wizard state machine — run: npx tsx src/test.ts
-import { createWizardState, renderWizard, handleWizardInput } from "./wizard";
-import { mergeSelectedModels, removeProvider } from "./models-config";
+import { compatControlKeys, createWizardState, renderWizard, handleWizardInput } from "./wizard";
+import { mergeSelectedModels, removeProvider, replaceProvider } from "./models-config";
 import { listModelPresets, recommendModels, toModelCost } from "./discovery";
 import { Key } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -116,6 +116,47 @@ function assert(cond: boolean, msg: string) {
   assert(config.providers["remove-me"] === provider, "provider removal does not mutate input config");
 }
 
+// ─── Provider rename preserves settings and unrelated providers ─
+{
+  const provider = {
+    name: "Old Name",
+    baseUrl: "https://example.test",
+    api: "openai-completions" as const,
+    apiKey: "secret",
+    models: [],
+  };
+  const config = { providers: { old: provider, keep: { ...provider, name: "Keep" } } };
+  const result = replaceProvider(config, "old", "renamed", { ...provider, name: "New Name" });
+  assert(!result.providers.old, "provider rename removes the previous ID");
+  assert(result.providers.renamed?.name === "New Name", "provider rename saves the display name");
+  assert(result.providers.renamed?.apiKey === "secret", "provider rename preserves the API key");
+  assert(result.providers.keep?.name === "Keep", "provider rename preserves unrelated providers");
+}
+
+// ─── Existing provider fields auto-save without Enter ───────────
+{
+  const s = createWizardState([]);
+  s.step = "manage_config";
+  s.providerId = "provider-a";
+  s.providerOriginalId = "provider-a";
+
+  s.mfIdx = 1;
+  const nameAction = handleWizardInput(s, "A");
+  assert(nameAction?.type === "save_config" && s.providerName === "A", "provider name auto-saves while typing");
+
+  s.mfIdx = 4;
+  const keyAction = handleWizardInput(s, "k");
+  assert(keyAction?.type === "save_config" && s.apiKey === "k", "provider API key auto-saves while typing");
+
+  s.mfIdx = 2;
+  const apiAction = handleWizardInput(s, "\x1b[C");
+  assert(apiAction?.type === "save_config", "provider API type auto-saves when changed");
+
+  s.mfIdx = 0;
+  const idAction = handleWizardInput(s, mockBackspace());
+  assert(idAction?.type === "save_config", "provider ID rename auto-saves without Enter");
+}
+
 // ─── Model selection is the persisted source of truth ───────────
 {
   const existing = [{ id: "remove", reasoning: true }, { id: "edit", name: "Old", futureField: "keep" } as any];
@@ -180,6 +221,22 @@ function assert(cond: boolean, msg: string) {
   assert(compat?.futurePiField === "keep", "saving compat preserves fields the wizard does not manage");
   assert(compat?.supportsStrictMode === false, "provider compat writes the API-specific strict field");
   assert(!Object.hasOwn(compat!, "supportsStrictTools"), "stale strict fields are removed when the API changes");
+
+  const completionsKeys = compatControlKeys("openai-completions");
+  assert(completionsKeys.length === 21, "OpenAI Completions displays every pi-ai compat field");
+  assert(
+    ["chatTemplateKwargs", "openRouterRouting", "vercelGatewayRouting", "zaiToolStream"].every((key) =>
+      completionsKeys.includes(key),
+    ),
+    "OpenAI Completions includes scalar and JSON compat fields",
+  );
+  assert(compatControlKeys("openai-responses").length === 7, "OpenAI Responses uses its own compat schema");
+  assert(compatControlKeys("anthropic-messages").length === 9, "Anthropic uses its own compat schema");
+  assert(compatControlKeys("bedrock-converse-stream").length === 1, "Bedrock uses its own compat schema");
+  assert(
+    compatControlKeys("google-generative-ai").length === 0 && compatControlKeys("mistral-conversations").length === 0,
+    "APIs without pi-ai model compat do not display unrelated controls",
+  );
 }
 
 // ─── Catalog URL suggestions preserve distinct full model IDs ───
@@ -283,6 +340,17 @@ function assert(cond: boolean, msg: string) {
   ];
   s.modelCursor = 0;
 
+  const toggle = handleWizardInput(s, " ");
+  assert(toggle?.type === "save_models", "space auto-saves model selection for an existing provider");
+  assert(s.discoveredModels[0].selected === true, "space selects the highlighted existing model");
+
+  const selectAll = handleWizardInput(s, "a");
+  assert(selectAll?.type === "save_models", "select all auto-saves for an existing provider");
+  assert(
+    s.discoveredModels.every((model) => model.selected),
+    "select all selects every model",
+  );
+
   // Enter on model in edit mode → edit
   const a = handleWizardInput(s, mockEnter());
   assert(s.step === "edit_model", "enter on model in edit mode opens editor");
@@ -356,6 +424,53 @@ function assert(cond: boolean, msg: string) {
   assert(filterAction?.type === "render", "exiting a filter does not save configuration");
 }
 
+// ─── Existing provider filter selection auto-saves ──────────────
+{
+  const s = createWizardState([]);
+  s.step = "select_models";
+  s.selectModelsFrom = "edit_models";
+  s.discoveredModels = [
+    {
+      id: "gpt-existing",
+      name: "gpt-existing",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128000,
+      maxTokens: 16384,
+      selected: true,
+      edited: false,
+    },
+  ];
+  handleWizardInput(s, "/");
+  handleWizardInput(s, "g");
+  const toggle = handleWizardInput(s, " ");
+  assert(toggle?.type === "save_models", "space auto-saves an existing provider while filtering");
+  assert(s.discoveredModels[0].selected === false, "filtered space toggles the visible model");
+}
+
+// ─── API discovery for an existing provider also auto-saves ─────
+{
+  const s = createWizardState([]);
+  s.step = "select_models";
+  s.providerId = "existing-provider";
+  s.providerOriginalId = "existing-provider";
+  s.selectModelsFrom = "discover";
+  s.discoveredModels = [
+    {
+      id: "api-discovered-model",
+      name: "api-discovered-model",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128000,
+      maxTokens: 16384,
+      selected: false,
+      edited: false,
+    },
+  ];
+  const toggle = handleWizardInput(s, " ");
+  assert(toggle?.type === "save_models", "API-discovered selection auto-saves for an existing provider");
+}
+
 // ─── Test 8: Space toggle outside filter ────────────────────────
 {
   const s = createWizardState([]);
@@ -398,9 +513,10 @@ function assert(cond: boolean, msg: string) {
   ];
   handleWizardInput(s, mockEnter());
   assert(s.step === "edit_compat", "opens compatibility editor");
-  handleWizardInput(s, "\x1b[C");
-  const save = handleWizardInput(s, mockEnter());
-  assert(save?.type === "render" && s.step === "select_models", "enter saves and exits compatibility editing");
+  const save = handleWizardInput(s, "\x1b[C");
+  assert(save?.type === "render", "compatibility changes auto-save immediately");
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "edit_model", "enter only returns from compatibility editing");
   assert(s.discoveredModels[0].compat?.supportsStore === true, "saves compatibility toggle without JSON");
 }
 
@@ -436,8 +552,9 @@ function assert(cond: boolean, msg: string) {
   assert(s.step === "model_preset", "p opens the complete model preset picker");
   handleWizardInput(s, "/");
   for (const char of "deepseek-v4-flash") handleWizardInput(s, char);
-  handleWizardInput(s, mockEnter());
+  const presetSave = handleWizardInput(s, mockEnter());
   assert(s.step === "edit_model", "enter applies the selected preset and returns to model editing");
+  assert(presetSave?.type === "save_models", "applying a preset auto-saves an existing model");
   assert(s.editReasoning === (expected?.model.reasoning ? 1 : 0), "preset copies reasoning support");
   assert(s.editImageInput === (expected?.model.input.includes("image") ? 1 : 0), "preset copies input modalities");
   assert(s.editContextWindow === String(expected?.model.contextWindow), "preset copies the context window");
@@ -454,9 +571,7 @@ function assert(cond: boolean, msg: string) {
   );
   assert(s.modelPresetLabel.includes("deepseek-v4-flash"), "the applied model preset remains visible");
 
-  const save = handleWizardInput(s, mockEnter());
-  assert(save?.type === "save_models", "saving a preset writes an existing provider immediately");
-  assert(s.step === "select_models", "saving a preset returns to the model list");
+  assert(s.step === "edit_model", "auto-saving a preset keeps the editor open for further changes");
   assert(s.discoveredModels[0].id === "360-deepseek-v4-flash", "applying a preset preserves the callable model ID");
   assert(s.discoveredModels[0].name === expected?.model.name, "saving writes the preset model name");
   assert(s.discoveredModels[0].contextWindow === expected?.model.contextWindow, "saving writes preset limits");
@@ -469,6 +584,7 @@ function assert(cond: boolean, msg: string) {
     "saving writes preset compatibility metadata",
   );
 
+  handleWizardInput(s, mockEnter());
   handleWizardInput(s, "e");
   s.editFieldIdx = 6;
   handleWizardInput(s, mockEnter());
@@ -478,6 +594,42 @@ function assert(cond: boolean, msg: string) {
   handleWizardInput(s, "x");
   handleWizardInput(s, mockEnter());
   assert(!s.discoveredModels[0].compat, "x clears all compatibility overrides before saving");
+}
+
+// ─── Object-valued compat fields use a JSON sub-editor ──────────
+{
+  const s = createWizardState([]);
+  s.step = "edit_model";
+  s.apiType = "openai-completions";
+  s.editingModelIdx = 0;
+  s.editFieldIdx = 6;
+  s.discoveredModels = [
+    {
+      id: "custom-openrouter-model",
+      name: "custom-openrouter-model",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128000,
+      maxTokens: 16384,
+      selected: true,
+      edited: false,
+    },
+  ];
+  handleWizardInput(s, mockEnter());
+  s.compatFieldIdx = compatControlKeys(s.apiType).indexOf("openRouterRouting");
+  handleWizardInput(s, "e");
+  assert(s.step === "edit_compat_json", "e opens JSON editing for object-valued compat fields");
+  handleWizardInput(s, "{");
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "edit_compat_json" && !!s.compatJsonError, "invalid compat JSON stays open with an error");
+  handleWizardInput(s, mockBackspace());
+  for (const char of '{"only":["deepinfra"]}') handleWizardInput(s, char);
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "edit_compat", "valid compat JSON returns to the API-specific compatibility list");
+  assert(
+    JSON.stringify(s.compatDraft.openRouterRouting) === '{"only":["deepinfra"]}',
+    "JSON compat values are applied as objects",
+  );
 }
 
 // ─── Filtered model actions target the visible item ─────────────
@@ -568,4 +720,7 @@ function mockEnter() {
 }
 function mockEsc() {
   return "\x1b";
+}
+function mockBackspace() {
+  return "\x7f";
 }

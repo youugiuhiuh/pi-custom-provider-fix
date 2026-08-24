@@ -1,6 +1,12 @@
 // pi-custom-provider wizard
 import { Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import type {
+  AnthropicMessagesCompat,
+  BedrockCompat,
+  OpenAICompletionsCompat,
+  OpenAIResponsesCompat,
+} from "@earendil-works/pi-ai";
 import type { ModelAPI, ModelCost, ThinkingLevelMap } from "./types";
 import { providerCompatKeys } from "./types";
 import { listModelPresets, type ModelPreset } from "./discovery";
@@ -16,6 +22,7 @@ export type WizardStep =
   | "select_models"
   | "edit_model"
   | "edit_compat"
+  | "edit_compat_json"
   | "model_preset"
   | "review"
   | "manage_config";
@@ -37,13 +44,15 @@ export interface WizardModelItem {
 
 export interface WizardState {
   step: WizardStep;
-  existingProviders: Array<{ id: string; modelCount: number }>;
+  existingProviders: Array<{ id: string; name?: string; modelCount: number }>;
   chosenProviderIdx: number;
   apiType: ModelAPI;
   apiTypeIdx: number;
   baseUrl: string;
   apiKey: string;
   providerId: string;
+  providerOriginalId: string;
+  providerName: string;
   mfIdx: number;
   mfAuth: number;
   mfDevRole: number;
@@ -69,6 +78,8 @@ export interface WizardState {
   editThinkingMap: string;
   compatFieldIdx: number;
   compatDraft: Record<string, unknown>;
+  compatJsonDraft: string;
+  compatJsonError: string;
   modelPresetCursor: number;
   modelPresetFilter: string;
   modelPresetFiltering: boolean;
@@ -107,9 +118,15 @@ const AL: Record<string, string> = {
   "google-vertex": "Google Vertex AI [OAuth]",
 };
 
-type CompatControl = { key: string; label: string; values: Array<boolean | string | undefined> };
-const BOOL: Array<boolean | undefined> = [undefined, true, false];
-const OPENAI_COMPLETIONS_COMPAT: CompatControl[] = [
+type CompatChoiceControl<K extends string = string> = {
+  key: K;
+  label: string;
+  values: readonly (boolean | string | undefined)[];
+};
+type CompatJsonControl<K extends string = string> = { key: K; label: string; editor: "json" };
+type CompatControl<K extends string = string> = CompatChoiceControl<K> | CompatJsonControl<K>;
+const BOOL: readonly (boolean | undefined)[] = [undefined, true, false];
+const OPENAI_COMPLETIONS_COMPAT = [
   { key: "supportsStore", label: "Store requests", values: BOOL },
   { key: "supportsDeveloperRole", label: "Developer role", values: BOOL },
   { key: "supportsReasoningEffort", label: "Reasoning effort", values: BOOL },
@@ -136,6 +153,10 @@ const OPENAI_COMPLETIONS_COMPAT: CompatControl[] = [
       "ant-ling",
     ],
   },
+  { key: "chatTemplateKwargs", label: "Chat template kwargs", editor: "json" },
+  { key: "openRouterRouting", label: "OpenRouter routing", editor: "json" },
+  { key: "vercelGatewayRouting", label: "Vercel gateway routing", editor: "json" },
+  { key: "zaiToolStream", label: "z.ai tool streaming", values: BOOL },
   { key: "cacheControlFormat", label: "Cache control", values: [undefined, "anthropic"] },
   { key: "supportsOpenAIGrammarTools", label: "OpenAI grammar tools", values: BOOL },
   { key: "supportsStrictMode", label: "Strict tool schema", values: BOOL },
@@ -147,9 +168,9 @@ const OPENAI_COMPLETIONS_COMPAT: CompatControl[] = [
   },
   { key: "deferredToolsMode", label: "Deferred tools mode", values: [undefined, "kimi"] },
   { key: "supportsLongCacheRetention", label: "Long cache retention", values: BOOL },
-];
+] as const satisfies readonly CompatControl<keyof OpenAICompletionsCompat>[];
 
-const OPENAI_RESPONSES_COMPAT: CompatControl[] = [
+const OPENAI_RESPONSES_COMPAT = [
   { key: "supportsDeveloperRole", label: "Developer role", values: BOOL },
   {
     key: "sessionAffinityFormat",
@@ -161,9 +182,9 @@ const OPENAI_RESPONSES_COMPAT: CompatControl[] = [
   { key: "supportsOpenAIGrammarTools", label: "OpenAI grammar tools", values: BOOL },
   { key: "supportsToolSearch", label: "Native tool search", values: BOOL },
   { key: "supportsExplicitPromptCacheMode", label: "Explicit prompt cache", values: BOOL },
-];
+] as const satisfies readonly CompatControl<keyof OpenAIResponsesCompat>[];
 
-const ANTHROPIC_COMPAT: CompatControl[] = [
+const ANTHROPIC_COMPAT = [
   { key: "supportsEagerToolInputStreaming", label: "Eager tool input streaming", values: BOOL },
   { key: "supportsCacheControlOnTools", label: "Cache control on tools", values: BOOL },
   { key: "supportsTemperature", label: "Temperature", values: BOOL },
@@ -173,11 +194,27 @@ const ANTHROPIC_COMPAT: CompatControl[] = [
   { key: "supportsToolReferences", label: "Tool references", values: BOOL },
   { key: "supportsLongCacheRetention", label: "Long cache retention", values: BOOL },
   { key: "sendSessionAffinityHeaders", label: "Session affinity headers", values: BOOL },
-];
+] as const satisfies readonly CompatControl<keyof AnthropicMessagesCompat>[];
 
-const BEDROCK_COMPAT: CompatControl[] = [{ key: "supportsStrictMode", label: "Strict tool schema", values: BOOL }];
+const BEDROCK_COMPAT = [
+  { key: "supportsStrictMode", label: "Strict tool schema", values: BOOL },
+] as const satisfies readonly CompatControl<keyof BedrockCompat>[];
 
-function compatControls(api: ModelAPI): CompatControl[] {
+type AssertNoMissingCompatKeys<T extends never> = T;
+type _AllOpenAICompletionsCompatKeys = AssertNoMissingCompatKeys<
+  Exclude<keyof OpenAICompletionsCompat, (typeof OPENAI_COMPLETIONS_COMPAT)[number]["key"]>
+>;
+type _AllOpenAIResponsesCompatKeys = AssertNoMissingCompatKeys<
+  Exclude<keyof OpenAIResponsesCompat, (typeof OPENAI_RESPONSES_COMPAT)[number]["key"]>
+>;
+type _AllAnthropicCompatKeys = AssertNoMissingCompatKeys<
+  Exclude<keyof AnthropicMessagesCompat, (typeof ANTHROPIC_COMPAT)[number]["key"]>
+>;
+type _AllBedrockCompatKeys = AssertNoMissingCompatKeys<
+  Exclude<keyof BedrockCompat, (typeof BEDROCK_COMPAT)[number]["key"]>
+>;
+
+function compatControls(api: ModelAPI): readonly CompatControl[] {
   if (api === "anthropic-messages") return ANTHROPIC_COMPAT;
   if (api === "openai-completions") return OPENAI_COMPLETIONS_COMPAT;
   if (api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses") {
@@ -186,8 +223,16 @@ function compatControls(api: ModelAPI): CompatControl[] {
   if (api === "bedrock-converse-stream") return BEDROCK_COMPAT;
   return [];
 }
+
+export function compatControlKeys(api: ModelAPI): string[] {
+  return compatControls(api).map((control) => control.key);
+}
+
 function compatValue(v: unknown): string {
-  return v === undefined ? "Auto" : v === true ? "Yes" : v === false ? "No" : String(v);
+  if (v === undefined) return "Auto";
+  if (v === true) return "Yes";
+  if (v === false) return "No";
+  return typeof v === "object" ? JSON.stringify(v) : String(v);
 }
 
 type Th = ReturnType<typeof mkTh>;
@@ -206,7 +251,9 @@ function ft(n: number): string {
   return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}K` : String(n);
 }
 
-export function createWizardState(existing: Array<{ id: string; modelCount: number }> = []): WizardState {
+export function createWizardState(
+  existing: Array<{ id: string; name?: string; modelCount: number }> = [],
+): WizardState {
   return {
     step: "choose_provider",
     existingProviders: existing,
@@ -216,6 +263,8 @@ export function createWizardState(existing: Array<{ id: string; modelCount: numb
     baseUrl: "",
     apiKey: "",
     providerId: "",
+    providerOriginalId: "",
+    providerName: "",
     mfIdx: 0,
     mfAuth: 0,
     mfDevRole: 0,
@@ -241,6 +290,8 @@ export function createWizardState(existing: Array<{ id: string; modelCount: numb
     editThinkingMap: "",
     compatFieldIdx: 0,
     compatDraft: {},
+    compatJsonDraft: "",
+    compatJsonError: "",
     modelPresetCursor: 0,
     modelPresetFilter: "",
     modelPresetFiltering: false,
@@ -302,6 +353,9 @@ export function renderWizard(s: WizardState, w: number, t: Theme): string[] {
     case "edit_compat":
       rCompat(s, wr, th);
       break;
+    case "edit_compat_json":
+      rCompatJson(s, wr, th);
+      break;
     case "model_preset":
       rModelPreset(s, wr, th);
       break;
@@ -328,12 +382,18 @@ function footer(s: WizardState, th: Th): string {
     provider_id: "Type ID  |  Tab: discover  |  Esc: back",
     discovering: "...",
     select_models:
-      "Enter: save  |  Space: toggle  |  n: add custom  |  /: filter  |  d: delete  |  e: edit  |  Esc: back",
-    edit_model: "p: choose preset  |  Arrows: field  |  L/R: toggle  |  type: edit  |  Enter: save  |  Esc: cancel",
-    edit_compat: "p: choose preset  |  x: reset  |  Arrows: select  |  L/R: change  |  Enter: save  |  Esc: back",
+      s.selectModelsFrom === "edit_models"
+        ? "Auto-save  |  Space: toggle  |  a: select all  |  n: add custom  |  /: filter  |  d: delete  |  e: edit"
+        : s.providerOriginalId
+          ? "Auto-save  |  Space: toggle  |  a: select all  |  /: filter  |  e: edit  |  Esc: back"
+          : "Enter: save  |  Space: toggle  |  a: select all  |  n: add custom  |  /: filter  |  Esc: back",
+    edit_model: "Auto-save  |  p: preset  |  Arrows: field  |  L/R: toggle  |  type: edit  |  Enter/Esc: done",
+    edit_compat:
+      "Auto-save  |  p: preset  |  x: reset all  |  e: edit JSON  |  Arrows: select/change  |  Enter/Esc: back",
+    edit_compat_json: "Auto-save when JSON is valid  |  Enter/Esc: back",
     model_preset: "Arrows: select  |  /: filter  |  Enter: apply model  |  Esc: back",
     review: "Enter: save  |  Esc: back",
-    manage_config: "Arrows: field  |  L/R: toggle  |  Enter: save  |  Esc: back",
+    manage_config: "Auto-save  |  Arrows: field  |  L/R: toggle  |  type: edit  |  Enter/Esc: done",
   };
   if (s.step === "select_models" && (s.modelFiltering || s.modelFilter)) {
     return th.accent(`  ${s.modelFilter}_`) + "\n" + th.dim(m[s.step] || "");
@@ -349,7 +409,12 @@ function rChoose(s: WizardState, w: (t: string) => void, th: Th) {
   w("");
   const mi = (l: string, c: boolean) => w(`${c ? th.accent("> ") : "  "}${c ? th.bold(l) : l}`);
   mi("[+] Create New Provider", s.chosenProviderIdx === -1);
-  s.existingProviders.forEach((p, i) => mi(`${p.id} (${p.modelCount} models)`, s.chosenProviderIdx === i));
+  s.existingProviders.forEach((p, i) =>
+    mi(
+      `${p.name && p.name !== p.id ? `${p.name} [${p.id}]` : p.id} (${p.modelCount} models)`,
+      s.chosenProviderIdx === i,
+    ),
+  );
 }
 
 function rDeleteProvider(s: WizardState, w: (t: string) => void, th: Th) {
@@ -369,7 +434,9 @@ function rModels(s: WizardState, w: (t: string) => void, th: Th) {
   w(th.bold(`  Models: ${s.providerId}`));
   w("");
   if (!f.length) {
-    w(th.dim("  (no models)"));
+    const emptyMessage =
+      s.discoveredModels.length > 0 && s.modelFilter ? `  (no models match "${s.modelFilter}")` : "  (no models)";
+    w(th.dim(emptyMessage));
     w("");
     mi(w, th, "[+] Add Model", s.modelCursor === 0);
     if (s.selectModelsFrom === "edit_models") mi(w, th, "Edit Config", s.modelCursor === 1);
@@ -460,6 +527,7 @@ function rCompat(s: WizardState, w: (t: string) => void, th: Th) {
   const fields = compatControls(s.apiType),
     model = s.discoveredModels[s.editingModelIdx];
   w(th.bold(`  Compatibility: ${model?.id || s.providerId}`));
+  w(th.muted(`  ${s.apiType} · ${fields.length} API-specific options`));
   w("");
   if (!fields.length) {
     w(th.muted(`  ${s.apiType} has no model compat overrides in pi-ai.`));
@@ -471,13 +539,28 @@ function rCompat(s: WizardState, w: (t: string) => void, th: Th) {
   fields.slice(start, start + 10).forEach((field, i) => {
     const idx = start + i,
       selected = idx === s.compatFieldIdx;
-    const value = compatValue(s.compatDraft[field.key]);
+    const rawValue = compatValue(s.compatDraft[field.key]),
+      value = rawValue.length > 56 ? `${rawValue.slice(0, 55)}…` : rawValue,
+      hint = "editor" in field ? " e" : " ←→";
     w(
-      `${selected ? th.accent("> ") : "  "}${selected ? th.bold(field.label) : field.label}: ${th.accent(value)}${selected ? th.dim(" ←→") : ""}`,
+      `${selected ? th.accent("> ") : "  "}${selected ? th.bold(field.label) : field.label}: ${th.accent(value)}${selected ? th.dim(hint) : ""}`,
     );
   });
   w("");
   w(th.muted("Auto leaves Pi's built-in behavior unchanged."));
+}
+
+function rCompatJson(s: WizardState, w: (t: string) => void, th: Th) {
+  const field = compatControls(s.apiType)[s.compatFieldIdx],
+    model = s.discoveredModels[s.editingModelIdx];
+  w(th.bold(`  ${field?.label || "Compatibility JSON"}: ${model?.id || s.providerId}`));
+  w(th.muted(`  ${s.apiType} · JSON object; empty input clears this field`));
+  w("");
+  w(th.accent(`  > ${s.compatJsonDraft}|`));
+  if (s.compatJsonError) {
+    w("");
+    w(th.error(`  ${s.compatJsonError}`));
+  }
 }
 
 function modelPresetChoices(s: WizardState): ModelPreset[] {
@@ -519,30 +602,31 @@ function rRev(s: WizardState, w: (t: string) => void, th: Th) {
 }
 
 function rCfg(s: WizardState, w: (t: string) => void, th: Th) {
-  w(th.bold(`  Edit Config: ${s.providerId}`));
+  w(th.bold(`  Edit Provider: ${s.providerName || s.providerId}`));
+  w(th.success("  Changes are saved immediately."));
   w("");
   const fl = (l: string, v: string, i: number, h?: string) => {
     const f = i === s.mfIdx;
     w(`${f ? th.accent("> ") : "  "}${f ? th.bold(l) : l}: ${th.accent(v)}${f && h ? th.dim(` ${h}`) : ""}`);
   };
-  fl("API Type", APIS[s.apiTypeIdx], 0, "\u2190\u2192");
-  fl("Base URL", s.baseUrl, 1);
-  fl("API Key", s.apiKey ? "*".repeat(Math.min(s.apiKey.length, 20)) : "(not set)", 2);
+  fl("Provider ID", s.providerId, 0);
+  fl("Display Name", s.providerName || "(same as ID)", 1);
+  fl("API Type", APIS[s.apiTypeIdx], 2, "\u2190\u2192");
+  fl("Base URL", s.baseUrl, 3);
+  fl("API Key", s.apiKey ? "*".repeat(Math.min(s.apiKey.length, 20)) : "(not set)", 4);
   const al = ["Auto", "Bearer", "Custom"];
-  fl("Auth Method", al[s.mfAuth], 3, "\u2190\u2192");
+  fl("Auth Method", al[s.mfAuth], 5, "\u2190\u2192");
   const yn = (v: number) => (v === 1 ? "Yes" : v === 2 ? "No" : "Auto");
   const compat = providerCompatKeys(s.apiType);
-  fl("Dev Role", compat.developerRole ? yn(s.mfDevRole) : "N/A", 4, compat.developerRole ? "\u2190\u2192" : undefined);
+  fl("Dev Role", compat.developerRole ? yn(s.mfDevRole) : "N/A", 6, compat.developerRole ? "\u2190\u2192" : undefined);
   fl(
     "Reasoning Effort",
     compat.reasoningEffort ? yn(s.mfReasonEffort) : "N/A",
-    5,
+    7,
     compat.reasoningEffort ? "\u2190\u2192" : undefined,
   );
-  fl("Strict Tools", compat.strict ? yn(s.mfStrict) : "N/A", 6, compat.strict ? "\u2190\u2192" : undefined);
-  fl("Headers (JSON)", s.mfHeaders || "(none)", 7);
-  w("");
-  w(th.bold(th.accent("  > Save (Enter)")));
+  fl("Strict Tools", compat.strict ? yn(s.mfStrict) : "N/A", 8, compat.strict ? "\u2190\u2192" : undefined);
+  fl("Headers (JSON)", s.mfHeaders || "(none)", 9);
 }
 
 // ─── Input ───────────────────────────────────────────────────────
@@ -575,6 +659,8 @@ export function handleWizardInput(s: WizardState, d: string): WizardAction | nul
       return hEdit(s, d);
     case "edit_compat":
       return hCompat(s, d);
+    case "edit_compat_json":
+      return hCompatJson(s, d);
     case "model_preset":
       return hModelPreset(s, d);
     case "review":
@@ -594,6 +680,7 @@ const BACK: Record<string, string> = {
   provider_id: "api_key",
   edit_model: "select_models",
   edit_compat: "edit_model",
+  edit_compat_json: "edit_compat",
   review: "select_models",
   manage_config: "select_models",
 };
@@ -610,6 +697,7 @@ function esc(s: WizardState): WizardAction | null {
     return { type: "render" };
   }
   if (s.step === "choose_provider") return { type: "close" };
+  if (s.step === "manage_config" && s.providerOriginalId) s.providerId = s.providerOriginalId;
   const t = BACK[s.step];
   if (t === "close") return { type: "close" };
   if (t) {
@@ -638,6 +726,8 @@ function hChoose(s: WizardState, d: string): WizardAction | null {
       s.baseUrl = "";
       s.apiKey = "";
       s.providerId = "";
+      s.providerOriginalId = "";
+      s.providerName = "";
       return { type: "render" };
     }
     const p = s.existingProviders[s.chosenProviderIdx];
@@ -707,6 +797,7 @@ function hModels(s: WizardState, d: string): WizardAction | null {
       const m = f[s.modelCursor];
       if (m && s.modelCursor < f.length) {
         m.selected = !m.selected;
+        return modelSelectionAction(s);
       }
       return { type: "render" };
     }
@@ -748,12 +839,13 @@ function hModels(s: WizardState, d: string): WizardAction | null {
     const m = f[s.modelCursor];
     if (m && s.modelCursor < f.length) {
       m.selected = !m.selected;
+      return modelSelectionAction(s);
     }
     return { type: "render" };
   }
   if (d === "a") {
     s.discoveredModels.forEach((m) => (m.selected = true));
-    return { type: "render" };
+    return modelSelectionAction(s);
   }
   if (d === "n") {
     s.statusMessage = "Type model ID, Enter to add";
@@ -782,19 +874,29 @@ function hModels(s: WizardState, d: string): WizardAction | null {
   return null;
 }
 
+function modelSelectionAction(s: WizardState): WizardAction {
+  return isExistingProviderSession(s) ? { type: "save_models" } : { type: "render" };
+}
+
+function isExistingProviderSession(s: WizardState): boolean {
+  return s.selectModelsFrom === "edit_models" || Boolean(s.providerOriginalId);
+}
+
 function ldEdit(s: WizardState) {
   const m = s.discoveredModels[s.editingModelIdx];
   if (!m) return;
   s.editFieldIdx = 0;
   s.editReasoning = m.reasoning ? 1 : 0;
   s.editImageInput = m.input.includes("image") ? 1 : 0;
-  s.editContextWindow = "";
-  s.editMaxTokens = "";
-  s.editCostInput = "";
-  s.editCostOutput = "";
-  s.editThinkingMap = "";
+  s.editContextWindow = String(m.contextWindow);
+  s.editMaxTokens = String(m.maxTokens);
+  s.editCostInput = m.cost ? String(m.cost.input) : "";
+  s.editCostOutput = m.cost ? String(m.cost.output) : "";
+  s.editThinkingMap = m.thinkingLevelMap ? JSON.stringify(m.thinkingLevelMap) : "";
   s.compatFieldIdx = 0;
   s.compatDraft = { ...(m.compat || {}) };
+  s.compatJsonDraft = "";
+  s.compatJsonError = "";
   s.modelPresetCursor = 0;
   s.modelPresetFilter = "";
   s.modelPresetFiltering = false;
@@ -826,14 +928,17 @@ function hEdit(s: WizardState, d: string): WizardAction | null {
     if (s.editFieldIdx === 0) s.editReasoning = 1 - s.editReasoning;
     else s.editImageInput = 1 - s.editImageInput;
     s.modelPresetLabel = "Custom";
-    return { type: "render" };
+    return autosaveEditedModel(s);
   }
   const nf = ["editContextWindow", "editMaxTokens", "editCostInput", "editCostOutput", "editThinkingMap"] as const;
   const ni = s.editFieldIdx === 7 ? 4 : s.editFieldIdx - 2;
   if (ni >= 0 && ni < nf.length) {
     const action = ed(s, nf[ni], d);
-    if (action) s.modelPresetLabel = "Custom";
-    return action;
+    if (action) {
+      s.modelPresetLabel = "Custom";
+      return autosaveEditedModel(s);
+    }
+    return null;
   }
   return null;
 }
@@ -845,10 +950,17 @@ function hCompat(s: WizardState, d: string): WizardAction | null {
   if (d.toLowerCase() === "x") {
     s.compatDraft = {};
     s.modelPresetLabel = "Custom";
+    return autosaveEditedModel(s);
+  }
+  if (d.toLowerCase() === "e" && current && "editor" in current) {
+    s.compatJsonDraft = s.compatDraft[current.key] === undefined ? "" : JSON.stringify(s.compatDraft[current.key]);
+    s.compatJsonError = "";
+    s.step = "edit_compat_json";
     return { type: "render" };
   }
   if (matchesKey(d, Key.enter) || d === "\r") {
-    return saveEditedModel(s);
+    s.step = "edit_model";
+    return { type: "render" };
   }
   if (matchesKey(d, Key.up)) {
     s.compatFieldIdx = Math.max(0, s.compatFieldIdx - 1);
@@ -858,7 +970,7 @@ function hCompat(s: WizardState, d: string): WizardAction | null {
     s.compatFieldIdx = Math.min(fields.length - 1, s.compatFieldIdx + 1);
     return { type: "render" };
   }
-  if (current && (matchesKey(d, Key.left) || matchesKey(d, Key.right))) {
+  if (current && !("editor" in current) && (matchesKey(d, Key.left) || matchesKey(d, Key.right))) {
     const currentIndex = Math.max(
       0,
       current.values.findIndex((v) => v === s.compatDraft[current.key]),
@@ -868,9 +980,45 @@ function hCompat(s: WizardState, d: string): WizardAction | null {
     if (value === undefined) delete s.compatDraft[current.key];
     else s.compatDraft[current.key] = value;
     s.modelPresetLabel = "Custom";
-    return { type: "render" };
+    return autosaveEditedModel(s);
   }
   return null;
+}
+
+function hCompatJson(s: WizardState, d: string): WizardAction | null {
+  const current = compatControls(s.apiType)[s.compatFieldIdx];
+  if (!current || !("editor" in current)) {
+    s.step = "edit_compat";
+    return { type: "render" };
+  }
+  if (matchesKey(d, Key.enter) || d === "\r") {
+    if (!applyCompatJsonDraft(s, current, true)) return { type: "render" };
+    s.step = "edit_compat";
+    return autosaveEditedModel(s);
+  }
+  s.compatJsonError = "";
+  const action = ed(s, "compatJsonDraft", d);
+  if (!action) return null;
+  return applyCompatJsonDraft(s, current, false) ? autosaveEditedModel(s) : action;
+}
+
+function applyCompatJsonDraft(s: WizardState, current: CompatJsonControl, showError: boolean): boolean {
+  const input = s.compatJsonDraft.trim();
+  if (!input) {
+    delete s.compatDraft[current.key];
+  } else {
+    try {
+      const value: unknown = JSON.parse(input);
+      if (!isRecord(value)) throw new Error("Value must be a JSON object");
+      s.compatDraft[current.key] = value;
+    } catch (error) {
+      if (showError) s.compatJsonError = error instanceof Error ? error.message : "Invalid JSON object";
+      return false;
+    }
+  }
+  s.compatJsonError = "";
+  s.modelPresetLabel = "Custom";
+  return true;
 }
 
 function openModelPresetPicker(s: WizardState): WizardAction {
@@ -901,7 +1049,7 @@ function hModelPreset(s: WizardState, d: string): WizardAction | null {
     s.modelPresetFiltering = false;
     s.editFieldIdx = 0;
     s.step = "edit_model";
-    return { type: "render" };
+    return autosaveEditedModel(s);
   }
   if (d === "/" && !s.modelPresetFiltering) {
     s.modelPresetCursor = 0;
@@ -939,6 +1087,11 @@ function applyModelPreset(s: WizardState, preset: ModelPreset): void {
 function saveEditedModel(s: WizardState): WizardAction {
   applyE(s);
   s.step = "select_models";
+  return s.selectModelsFrom === "edit_models" ? { type: "save_models" } : { type: "render" };
+}
+
+function autosaveEditedModel(s: WizardState): WizardAction {
+  applyE(s);
   return s.selectModelsFrom === "edit_models" ? { type: "save_models" } : { type: "render" };
 }
 
@@ -987,7 +1140,7 @@ function applyE(s: WizardState) {
       if (isRecord(v) && Object.values(v).every((x) => typeof x === "string" || x === null))
         m.thinkingLevelMap = v as ThinkingLevelMap;
     } catch {}
-  else if (s.modelPresetDraft) delete m.thinkingLevelMap;
+  else delete m.thinkingLevelMap;
   m.edited = true;
 }
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -1049,17 +1202,21 @@ function hPid(s: WizardState, d: string): WizardAction | null {
 }
 
 function hCfg(s: WizardState, d: string): WizardAction | null {
-  if (matchesKey(d, Key.tab) || matchesKey(d, Key.enter) || d === "\r") return { type: "save_config" };
+  if (matchesKey(d, Key.tab) || matchesKey(d, Key.enter) || d === "\r") {
+    if (s.providerOriginalId) s.providerId = s.providerOriginalId;
+    s.step = "select_models";
+    return { type: "render" };
+  }
   if (matchesKey(d, Key.up)) {
     s.mfIdx = Math.max(0, s.mfIdx - 1);
     return { type: "render" };
   }
   if (matchesKey(d, Key.down)) {
-    s.mfIdx = Math.min(7, s.mfIdx + 1);
+    s.mfIdx = Math.min(9, s.mfIdx + 1);
     return { type: "render" };
   }
   const TG: Record<number, { get: () => number; set: (v: number) => void; max: number }> = {
-    0: {
+    2: {
       get: () => s.apiTypeIdx,
       set: (v) => {
         s.apiTypeIdx = v;
@@ -1067,7 +1224,7 @@ function hCfg(s: WizardState, d: string): WizardAction | null {
       },
       max: APIS.length - 1,
     },
-    3: {
+    5: {
       get: () => s.mfAuth,
       set: (v) => {
         s.mfAuth = v;
@@ -1076,17 +1233,23 @@ function hCfg(s: WizardState, d: string): WizardAction | null {
     },
   };
   const compat = providerCompatKeys(s.apiType);
-  if (compat.developerRole) TG[4] = { get: () => s.mfDevRole, set: (v) => (s.mfDevRole = v), max: 2 };
-  if (compat.reasoningEffort) TG[5] = { get: () => s.mfReasonEffort, set: (v) => (s.mfReasonEffort = v), max: 2 };
-  if (compat.strict) TG[6] = { get: () => s.mfStrict, set: (v) => (s.mfStrict = v), max: 2 };
+  if (compat.developerRole) TG[6] = { get: () => s.mfDevRole, set: (v) => (s.mfDevRole = v), max: 2 };
+  if (compat.reasoningEffort) TG[7] = { get: () => s.mfReasonEffort, set: (v) => (s.mfReasonEffort = v), max: 2 };
+  if (compat.strict) TG[8] = { get: () => s.mfStrict, set: (v) => (s.mfStrict = v), max: 2 };
   const t = TG[s.mfIdx];
   if (t && (matchesKey(d, Key.left) || matchesKey(d, Key.right))) {
     const dir = matchesKey(d, Key.right) ? 1 : -1;
     t.set((((t.get() + dir) % (t.max + 1)) + (t.max + 1)) % (t.max + 1));
-    return { type: "render" };
+    return { type: "save_config" };
   }
-  const TX: Record<number, TextField> = { 1: "baseUrl", 2: "apiKey", 7: "mfHeaders" };
-  if (TX[s.mfIdx]) return ed(s, TX[s.mfIdx], d);
+  const TX: Record<number, TextField> = {
+    0: "providerId",
+    1: "providerName",
+    3: "baseUrl",
+    4: "apiKey",
+    9: "mfHeaders",
+  };
+  if (TX[s.mfIdx] && ed(s, TX[s.mfIdx], d)) return { type: "save_config" };
   return null;
 }
 
@@ -1094,12 +1257,14 @@ type TextField =
   | "baseUrl"
   | "apiKey"
   | "providerId"
+  | "providerName"
   | "mfHeaders"
   | "editContextWindow"
   | "editMaxTokens"
   | "editCostInput"
   | "editCostOutput"
   | "editThinkingMap"
+  | "compatJsonDraft"
   | "modelFilter"
   | "discoveryStatus"
   | "statusMessage";

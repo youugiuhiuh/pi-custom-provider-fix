@@ -1,6 +1,6 @@
 // E2E test: run with `npx tsx src/e2e.ts`
 import { createWizardState, handleWizardInput } from "./wizard";
-import { readConfig, writeConfig, addProvider } from "./models-config";
+import { readConfig, writeConfig, addProvider, replaceProvider } from "./models-config";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -164,6 +164,28 @@ t("FILTER: Space toggles in filter mode", () => {
   return true;
 });
 
+t("EDIT MODELS: Space selection auto-saves", () => {
+  const s = createWizardState([]);
+  s.step = "select_models";
+  s.selectModelsFrom = "edit_models";
+  s.discoveredModels = [M("existing", true)];
+  s.modelCursor = 0;
+  const action = handleWizardInput(s, " ");
+  return action?.type === "save_models" && s.discoveredModels[0].selected === false;
+});
+
+t("ADD MODEL: API-discovered selection auto-saves", () => {
+  const s = createWizardState([]);
+  s.step = "select_models";
+  s.providerId = "existing";
+  s.providerOriginalId = "existing";
+  s.selectModelsFrom = "discover";
+  s.discoveredModels = [M("api-model", false)];
+  s.modelCursor = 0;
+  const action = handleWizardInput(s, " ");
+  return action?.type === "save_models" && s.discoveredModels[0].selected === true;
+});
+
 // ─── 8. DISCOVERY: Enter saves only selected ─────────────────────
 t("DISCOVERY: Enter saves selected only", () => {
   const s = createWizardState([]);
@@ -197,10 +219,15 @@ t("EDIT: toggle reasoning + auto-save", () => {
   s.modelCursor = 0;
   handleWizardInput(s, ENTER);
   if (s.step !== "edit_model") return false;
-  handleWizardInput(s, LEFT); // toggle reasoning
-  if (s.editReasoning !== 1) return false;
-  const a = handleWizardInput(s, ENTER); // save
-  return a?.type === "save_models" && s.discoveredModels[0].reasoning === true;
+  const toggleAction = handleWizardInput(s, LEFT); // toggle reasoning + save
+  s.editFieldIdx = 2;
+  const textAction = handleWizardInput(s, "\x7f"); // 128000 -> 12800 + save
+  return (
+    toggleAction?.type === "save_models" &&
+    textAction?.type === "save_models" &&
+    s.discoveredModels[0].reasoning === true &&
+    s.discoveredModels[0].contextWindow === 12800
+  );
 });
 
 // ─── 11. ESC chain ───────────────────────────────────────────────
@@ -251,6 +278,25 @@ t("REFRESH: provider list after save", () => {
   const cfg = readConfig();
   const list = Object.entries(cfg.providers).map(([id, p]) => ({ id, modelCount: p.models?.length || 0 }));
   return list.some((p) => p.id === "test-prov");
+});
+
+// ─── 15. Provider metadata can be renamed and updated ───────────
+t("EDIT PROVIDER: rename and display name persist", () => {
+  const cfg = readConfig();
+  const provider = cfg.providers["test-prov"];
+  writeConfig(
+    replaceProvider(cfg, "test-prov", "renamed-provider", {
+      ...provider,
+      name: "Renamed Provider",
+      apiKey: "updated-key",
+    }),
+  );
+  const updated = readConfig();
+  return (
+    !updated.providers["test-prov"] &&
+    updated.providers["renamed-provider"]?.name === "Renamed Provider" &&
+    updated.providers["renamed-provider"]?.apiKey === "updated-key"
+  );
 });
 
 // ─── Cleanup ─────────────────────────────────────────────────────

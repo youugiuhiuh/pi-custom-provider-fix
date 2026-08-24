@@ -38,6 +38,19 @@ export function addProvider(config: ModelsConfig, id: string, provider: Provider
   return { providers: { ...config.providers, [id]: provider } };
 }
 
+/** Replace or rename one provider without disturbing any other provider entries. */
+export function replaceProvider(
+  config: ModelsConfig,
+  previousId: string,
+  nextId: string,
+  provider: ProviderConfig,
+): ModelsConfig {
+  const providers = { ...config.providers };
+  if (previousId !== nextId) delete providers[previousId];
+  providers[nextId] = provider;
+  return { providers };
+}
+
 export function removeProvider(config: ModelsConfig, id: string): ModelsConfig {
   const providers = { ...config.providers };
   delete providers[id];

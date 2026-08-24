@@ -1,7 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ProviderConfig } from "./types";
 import { mergeProviderCompat, providerCompatKeys, usesAuthHeader } from "./types";
-import { readConfig, writeConfig, addProvider, removeProvider, mergeSelectedModels } from "./models-config";
+import {
+  readConfig,
+  writeConfig,
+  addProvider,
+  removeProvider,
+  replaceProvider,
+  mergeSelectedModels,
+} from "./models-config";
 import { discoverModels, recommendModel } from "./discovery";
 import { createWizardState, renderWizard, handleWizardInput } from "./wizard";
 import * as fs from "node:fs";
@@ -47,7 +54,11 @@ const IDX: Record<string, number> = {
 
 async function run(ctx: ExtensionContext) {
   const cfg = readConfig();
-  const existing = Object.entries(cfg.providers).map(([id, p]) => ({ id, modelCount: p.models?.length || 0 }));
+  const existing = Object.entries(cfg.providers).map(([id, p]) => ({
+    id,
+    name: p.name,
+    modelCount: p.models?.length || 0,
+  }));
   const s = createWizardState(existing);
 
   const toModels = () =>
@@ -100,10 +111,12 @@ async function run(ctx: ExtensionContext) {
       return;
     }
     s.providerId = id;
+    s.providerOriginalId = id;
+    s.providerName = p.name || "";
     s.apiType = p.api;
     s.apiTypeIdx = IDX[p.api] ?? 0;
     s.baseUrl = p.baseUrl;
-    s.apiKey = p.apiKey || "";
+    s.apiKey = p.apiKey || readAuthKey(id) || "";
     s.discoveredModels = (p.models || []).map((m) => ({
       id: m.id,
       name: m.name || m.id,
@@ -118,6 +131,9 @@ async function run(ctx: ExtensionContext) {
       edited: false,
     }));
     s.modelCursor = 0;
+    s.modelFilter = "";
+    s.modelFiltering = false;
+    s.addingCustom = false;
     s.selectModelsFrom = "edit_models";
     s.step = "select_models";
   };
@@ -134,6 +150,7 @@ async function run(ctx: ExtensionContext) {
     );
     s.existingProviders = Object.entries(readConfig().providers).map(([id, p]) => ({
       id,
+      name: p.name,
       modelCount: p.models?.length || 0,
     }));
     s.statusMessage = `Saved ${models.length} model(s).`;
@@ -145,10 +162,12 @@ async function run(ctx: ExtensionContext) {
     const p = readConfig().providers[id];
     if (!p) return;
     s.providerId = id;
+    s.providerOriginalId = id;
+    s.providerName = p.name || "";
     s.apiType = p.api;
     s.apiTypeIdx = IDX[p.api] ?? 0;
     s.baseUrl = p.baseUrl;
-    s.apiKey = p.apiKey || "";
+    s.apiKey = p.apiKey || readAuthKey(id) || "";
     s.mfAuth = p.authHeader === false ? 2 : p.authHeader === true ? 1 : 0;
     const keys = providerCompatKeys(p.api);
     s.mfDevRole = tri(keys.developerRole ? p.compat?.[keys.developerRole] : undefined);
@@ -160,7 +179,20 @@ async function run(ctx: ExtensionContext) {
   };
 
   const saveConfig = () => {
-    const p = readConfig().providers[s.providerId];
+    const config = readConfig();
+    const previousId = s.providerOriginalId || s.providerId;
+    const nextId = s.providerId.trim();
+    if (!nextId) {
+      s.statusMessage = "Provider ID is required.";
+      s.statusType = "error";
+      return;
+    }
+    if (nextId !== previousId && config.providers[nextId]) {
+      s.statusMessage = `Provider "${nextId}" already exists.`;
+      s.statusType = "error";
+      return;
+    }
+    const p = config.providers[previousId];
     if (!p) return;
     const c = mergeProviderCompat(p.compat, s.apiType, {
       developerRole: s.mfDevRole,
@@ -178,23 +210,26 @@ async function run(ctx: ExtensionContext) {
       }
     }
     writeConfig(
-      addProvider(readConfig(), s.providerId, {
+      replaceProvider(config, previousId, nextId, {
         ...p,
+        name: s.providerName.trim() || undefined,
         baseUrl: s.baseUrl,
         api: s.apiType,
-        apiKey: s.apiKey || p.apiKey,
+        apiKey: s.apiKey || undefined,
         authHeader: s.mfAuth === 2 ? false : s.mfAuth === 1 ? true : undefined,
         compat: c,
         headers: h,
       }),
     );
+    s.providerId = nextId;
+    s.providerOriginalId = nextId;
     s.existingProviders = Object.entries(readConfig().providers).map(([id, p]) => ({
       id,
+      name: p.name,
       modelCount: p.models?.length || 0,
     }));
-    s.statusMessage = "Config saved.";
+    s.statusMessage = "Saved automatically.";
     s.statusType = "success";
-    s.step = "select_models";
   };
 
   const deleteProvider = (id: string) => {
@@ -208,12 +243,15 @@ async function run(ctx: ExtensionContext) {
     writeConfig(removeProvider(cfg, id));
     s.existingProviders = Object.entries(readConfig().providers).map(([providerId, p]) => ({
       id: providerId,
+      name: p.name,
       modelCount: p.models?.length || 0,
     }));
     s.chosenProviderIdx = s.existingProviders.length
       ? Math.min(s.chosenProviderIdx, s.existingProviders.length - 1)
       : -1;
     s.providerId = "";
+    s.providerOriginalId = "";
+    s.providerName = "";
     s.discoveredModels = [];
     s.statusMessage = `Deleted provider "${id}".`;
     s.statusType = "success";
@@ -263,6 +301,7 @@ async function run(ctx: ExtensionContext) {
             const sel = s.discoveredModels.filter((m) => m.selected);
             writeConfig(
               addProvider(readConfig(), s.providerId, {
+                name: s.providerName.trim() || undefined,
                 baseUrl: s.baseUrl,
                 api: s.apiType,
                 apiKey: s.apiKey || readConfig().providers[s.providerId]?.apiKey || undefined,
@@ -272,6 +311,7 @@ async function run(ctx: ExtensionContext) {
             );
             s.existingProviders = Object.entries(readConfig().providers).map(([id, p]) => ({
               id,
+              name: p.name,
               modelCount: p.models?.length || 0,
             }));
             s.statusMessage = `Saved ${sel.length} model(s).`;
@@ -335,6 +375,7 @@ async function run(ctx: ExtensionContext) {
               s.statusMessage = "Catalog lookup failed, using defaults.";
               s.statusType = "warning";
             }
+            if (s.providerOriginalId) saveModels();
             refresh();
           })();
           break;
