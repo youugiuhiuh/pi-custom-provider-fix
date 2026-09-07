@@ -1,12 +1,19 @@
 // Test wizard state machine — run: npx tsx src/test.ts
-import { compatControlKeys, createWizardState, renderWizard, handleWizardInput } from "./wizard";
-import { mergeSelectedModels, removeProvider, replaceProvider } from "./models-config";
+import { createWizardState, renderWizard, handleWizardInput } from "./wizard";
+import { importConfig, mergeSelectedModels, removeProvider, replaceProvider } from "./models-config";
 import { listModelPresets, recommendModels, toModelCost } from "./discovery";
+import { importPastedOAuthJson, readOAuthCredential } from "./oauth";
+import { syncConfiguredProviders } from "./provider-registry";
+import { API_CHOICES, OAUTH_PROVIDER_CHOICES, oauthProviderSupportsApi } from "./pi-catalog";
+import { setManagedApiChoice } from "./provider-flow";
+import { createAuthInteraction } from "./index";
 import { Key } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import type { ModelAPI } from "./types";
-import { mergeProviderCompat, providerCompatKeys } from "./types";
+import type { KnownApi } from "@earendil-works/pi-ai";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 let failed = 0;
 const mockTheme = {
@@ -46,7 +53,7 @@ function assert(cond: boolean, msg: string) {
   assert(s.step === "api_type", "enters api_type after Create New");
 }
 
-// ─── Test 4: API type → base_url → api_key → provider_id ────────
+// ─── Test 4: API type → base_url → provider_id → auth ───────────
 {
   const s = createWizardState([]);
   s.step = "api_type";
@@ -57,15 +64,161 @@ function assert(cond: boolean, msg: string) {
 
   s.baseUrl = "https://api.openai.com/v1";
   handleWizardInput(s, mockEnter());
-  assert(s.step === "api_key", "base_url -> api_key");
-
-  handleWizardInput(s, mockTab());
-  assert(s.step === "provider_id", "api_key -> provider_id");
+  assert(s.step === "provider_id", "base_url -> provider_id before auth");
 
   s.providerId = "my-test";
+  handleWizardInput(s, mockTab());
+  assert(s.step === "oauth_provider", "provider_id -> oauth_provider so auth mode is explicit");
+
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "api_key", "OAuth Provider None -> api_key");
+
   const a = handleWizardInput(s, mockTab());
-  assert(s.step === "discovering", "provider_id -> discovering");
+  assert(s.step === "discovering", "api_key -> discovering");
   assert(a?.type === "discover", "emits discover action");
+}
+
+// ─── OAuth API enters OAuth provider selection ──────────────────
+{
+  const s = createWizardState([]);
+  s.step = "api_type";
+  s.apiType = "openai-codex-responses";
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "base_url", "OAuth API -> base_url");
+  s.baseUrl = "https://chatgpt.com/backend-api";
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "provider_id", "OAuth API base_url -> provider_id");
+  s.providerId = "codex-test";
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "oauth_provider", "OAuth API provider_id -> oauth_provider");
+  assert(s.oauthProviderIdx > 0, "OAuth API selects a default OAuth provider");
+  const rendered = renderWizard(s, 100, mockTheme).join("\n");
+  assert(rendered.includes("OpenAI Codex"), "Codex API shows OpenAI Codex OAuth provider");
+  assert(!rendered.includes("None"), "Codex API hides None because it has no API-key auth");
+  assert(!rendered.includes("API Key"), "Codex API hides API key auth because it is not supported");
+  assert(!rendered.includes("xAI"), "Codex API hides OAuth providers that do not support Codex API");
+}
+
+// ─── API-key APIs default to API key even when OAuth exists ──────
+{
+  const s = createWizardState([]);
+  s.step = "api_type";
+  s.apiType = "openai-completions";
+  s.apiTypeIdx = API_CHOICES.indexOf("openai-completions");
+  handleWizardInput(s, mockEnter());
+  s.baseUrl = "https://api.openai.com/v1";
+  handleWizardInput(s, mockEnter());
+  s.providerId = "openai-key-provider";
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "oauth_provider", "API-key API still shows auth mode selection");
+  assert(OAUTH_PROVIDER_CHOICES[s.oauthProviderIdx] === "none", "API-key API defaults to None instead of OAuth");
+  assert(renderWizard(s, 100, mockTheme).join("\n").includes("API Key"), "API-key API labels the non-OAuth choice clearly");
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "api_key", "default None continues to API key input");
+}
+
+// ─── APIs with several OAuth providers are still selectable ─────
+{
+  const s = createWizardState([]);
+  s.step = "api_type";
+  s.apiType = "anthropic-messages";
+  handleWizardInput(s, mockEnter());
+  s.baseUrl = "https://api.anthropic.com";
+  handleWizardInput(s, mockEnter());
+  s.providerId = "anthropic-test";
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "oauth_provider", "multi-provider OAuth API still reaches OAuth provider selection");
+  handleWizardInput(s, mockDown());
+  const provider = OAUTH_PROVIDER_CHOICES[s.oauthProviderIdx];
+  assert(provider !== "none", "can choose a Pi OAuth provider for a shared API type");
+  assert(oauthProviderSupportsApi(provider, "anthropic-messages"), "chosen OAuth provider supports the current API type");
+}
+
+// ─── OAuth provider can use a JSON credential path ───────────────
+{
+  const s = createWizardState([]);
+  s.step = "oauth_provider";
+  s.apiType = "openai-completions";
+  s.providerId = "oauth-json-test";
+  handleWizardInput(s, mockDown());
+  assert(s.oauthProviderIdx > 0, "oauth provider selector moves through supported providers");
+  assert(oauthProviderSupportsApi(OAUTH_PROVIDER_CHOICES[s.oauthProviderIdx], "openai-completions"), "oauth provider supports the selected API");
+  handleWizardInput(s, mockEnter());
+  assert(s.step === "oauth_json_path", "oauth provider -> oauth_json_path");
+  for (const c of "~/.pi/agent/auth.json") handleWizardInput(s, c);
+  const a = handleWizardInput(s, mockEnter());
+  assert(s.step === "discovering" && s.oauthJsonPath.endsWith("auth.json"), "oauth JSON path discovers after provider id");
+  assert(a?.type === "discover", "OAuth JSON path uses file-backed discovery");
+  assert(!(a?.payload as any)?.forceOAuthLogin, "OAuth JSON path does not force browser login");
+}
+
+// ─── OAuth API default URL replaces another OAuth default URL ────
+{
+  const s = createWizardState([]);
+  const codexIndex = API_CHOICES.indexOf("openai-codex-responses");
+  if (codexIndex >= 0) {
+    s.step = "api_type";
+    s.apiTypeIdx = codexIndex;
+    s.apiType = "openai-codex-responses";
+    s.baseUrl = "https://api.x.ai/v1";
+    handleWizardInput(s, mockEnter());
+    assert(s.baseUrl === "https://chatgpt.com/backend-api", "Codex API replaces stale xAI OAuth default URL");
+  }
+}
+
+// ─── OAuth API keeps a custom base URL ──────────────────────────
+{
+  const s = createWizardState([]);
+  const codexIndex = API_CHOICES.indexOf("openai-codex-responses");
+  if (codexIndex >= 0) {
+    s.step = "api_type";
+    s.apiTypeIdx = codexIndex;
+    s.apiType = "openai-codex-responses";
+    s.baseUrl = "https://proxy.example.test/codex";
+    handleWizardInput(s, mockEnter());
+    assert(s.baseUrl === "https://proxy.example.test/codex", "Codex API keeps a custom base URL");
+  }
+}
+
+// ─── Manage config API change follows OAuth default URL rules ───
+{
+  const codexIndex = API_CHOICES.indexOf("openai-codex-responses");
+  if (codexIndex >= 0) {
+    const s = {
+      apiType: "openai-completions" as KnownApi,
+      apiTypeIdx: 0,
+      baseUrl: "https://api.x.ai/v1",
+      mfOAuthProvider: 0,
+    };
+    setManagedApiChoice(s, codexIndex);
+    assert(s.baseUrl === "https://chatgpt.com/backend-api", "managed API change replaces stale OAuth default URL");
+  }
+}
+
+// ─── Empty OAuth JSON path uses stored OAuth when available ─────
+{
+  const s = createWizardState([]);
+  s.step = "oauth_provider";
+  s.apiType = "openai-codex-responses";
+  s.providerId = "codex-new";
+  handleWizardInput(s, mockEnter());
+  const a = handleWizardInput(s, mockEnter());
+  assert(a?.type === "discover", "empty OAuth JSON path starts the unified auth/discovery action");
+  assert(!(a?.payload as any)?.forceOAuthLogin, "empty OAuth JSON path does not force re-login");
+  assert(s.step === "discovering", "empty OAuth JSON path starts discovery");
+  assert(s.statusType !== "error", "empty OAuth JSON path does not error");
+}
+
+// ─── OAuth login requires a Provider ID ─────────────────────────
+{
+  const s = createWizardState([]);
+  s.step = "oauth_json_path";
+  s.apiType = "openai-codex-responses";
+  s.providerId = "";
+  const a = handleWizardInput(s, mockEnter());
+  assert(a?.type === "render", "OAuth JSON cannot discover without provider id");
+  assert(s.step === "provider_id", "missing provider id returns to Provider ID step");
+  assert(s.statusType === "error", "missing provider id is shown as an error");
 }
 
 // ─── Test 5: Select existing provider emits load_models ──────────
@@ -133,7 +286,7 @@ function assert(cond: boolean, msg: string) {
   assert(result.providers.keep?.name === "Keep", "provider rename preserves unrelated providers");
 }
 
-// ─── Existing provider fields auto-save without Enter ───────────
+// ─── Existing provider text fields edit safely before saving ─────
 {
   const s = createWizardState([]);
   s.step = "manage_config";
@@ -141,20 +294,27 @@ function assert(cond: boolean, msg: string) {
   s.providerOriginalId = "provider-a";
 
   s.mfIdx = 1;
-  const nameAction = handleWizardInput(s, "A");
-  assert(nameAction?.type === "save_config" && s.providerName === "A", "provider name auto-saves while typing");
+  const nameEdit = handleWizardInput(s, mockEnter());
+  assert(nameEdit?.type === "render" && s.mfEditing, "enter starts provider name editing");
+  handleWizardInput(s, "A");
+  const nameSave = handleWizardInput(s, mockEnter());
+  assert(nameSave?.type === "save_config" && s.providerName === "A", "provider name saves after confirm");
 
   s.mfIdx = 4;
-  const keyAction = handleWizardInput(s, "k");
-  assert(keyAction?.type === "save_config" && s.apiKey === "k", "provider API key auto-saves while typing");
+  handleWizardInput(s, mockEnter());
+  handleWizardInput(s, "k");
+  const keySave = handleWizardInput(s, mockEnter());
+  assert(keySave?.type === "save_config" && s.apiKey === "k", "provider API key saves after confirm");
 
   s.mfIdx = 2;
   const apiAction = handleWizardInput(s, "\x1b[C");
   assert(apiAction?.type === "save_config", "provider API type auto-saves when changed");
 
   s.mfIdx = 0;
-  const idAction = handleWizardInput(s, mockBackspace());
-  assert(idAction?.type === "save_config", "provider ID rename auto-saves without Enter");
+  handleWizardInput(s, mockEnter());
+  handleWizardInput(s, mockBackspace());
+  const idSave = handleWizardInput(s, mockEnter());
+  assert(idSave?.type === "save_config" && s.providerId === "provider-", "provider ID rename saves after confirm");
 }
 
 // ─── Model selection is the persisted source of truth ───────────
@@ -209,34 +369,157 @@ function assert(cond: boolean, msg: string) {
   );
 }
 
-// ─── Provider compat follows each pi-ai API schema ──────────────
+// ─── Config import does not infer OAuth from API type ───────────
 {
-  assert(providerCompatKeys("openai-completions").strict === "supportsStrictMode", "OpenAI uses strict mode");
-  assert(providerCompatKeys("anthropic-messages").strict === "supportsStrictTools", "Anthropic uses strict tools");
-  const compat = mergeProviderCompat({ futurePiField: "keep", supportsStrictTools: true }, "openai-completions", {
-    developerRole: 0,
-    reasoningEffort: 0,
-    strict: 2,
-  });
-  assert(compat?.futurePiField === "keep", "saving compat preserves fields the wizard does not manage");
-  assert(compat?.supportsStrictMode === false, "provider compat writes the API-specific strict field");
-  assert(!Object.hasOwn(compat!, "supportsStrictTools"), "stale strict fields are removed when the API changes");
+  const config = importConfig(
+    JSON.stringify({
+      providers: {
+        "codex-with-key": {
+          baseUrl: "https://example.test",
+          api: "openai-codex-responses",
+          apiKey: "sk-test",
+          models: [],
+        },
+      },
+    }),
+  );
+  const provider = config.providers["codex-with-key"];
+  assert(provider?.apiKey === "sk-test", "API key is preserved for Codex API when OAuth was not selected");
+  assert(!provider?.oauthProvider, "OAuth provider is not inferred from API type");
+}
 
-  const completionsKeys = compatControlKeys("openai-completions");
-  assert(completionsKeys.length === 21, "OpenAI Completions displays every pi-ai compat field");
-  assert(
-    ["chatTemplateKwargs", "openRouterRouting", "vercelGatewayRouting", "zaiToolStream"].every((key) =>
-      completionsKeys.includes(key),
-    ),
-    "OpenAI Completions includes scalar and JSON compat fields",
+// ─── Empty API-key providers do not request auth headers ─────────
+{
+  const config = importConfig(
+    JSON.stringify({
+      providers: {
+        dgx: {
+          baseUrl: "http://int0v.cd.zzdt.qihoo.net:18888/v1",
+          api: "openai-completions",
+          authHeader: true,
+          models: [],
+        },
+      },
+    }),
   );
-  assert(compatControlKeys("openai-responses").length === 7, "OpenAI Responses uses its own compat schema");
-  assert(compatControlKeys("anthropic-messages").length === 9, "Anthropic uses its own compat schema");
-  assert(compatControlKeys("bedrock-converse-stream").length === 1, "Bedrock uses its own compat schema");
+  assert(config.providers.dgx?.authHeader === false, "empty API-key provider disables Authorization header");
+}
+
+// ─── Pi catalog choices come from installed pi-ai ───────────────
+{
+  const piOAuthProviders = builtinProviders()
+    .filter((provider) => provider.auth?.oauth)
+    .map((provider) => provider.id)
+    .sort();
+  const pluginOAuthProviders = OAUTH_PROVIDER_CHOICES.filter((provider) => provider !== "none").sort();
   assert(
-    compatControlKeys("google-generative-ai").length === 0 && compatControlKeys("mistral-conversations").length === 0,
-    "APIs without pi-ai model compat do not display unrelated controls",
+    JSON.stringify(pluginOAuthProviders) === JSON.stringify(piOAuthProviders),
+    "OAuth provider choices exactly match Pi providers with auth.oauth",
   );
+  assert(API_CHOICES.includes("pi-messages"), "API choices include Pi's dynamic Radius API");
+  assert(OAUTH_PROVIDER_CHOICES.includes("openai-codex"), "OAuth choices include Pi's OpenAI Codex provider");
+}
+
+// ─── OAuth JSON auth path does not expose login ─────────────────
+{
+  let registered: any;
+  const pi = {
+    registerProvider(provider: unknown) {
+      registered = provider;
+    },
+    unregisterProvider() {},
+  };
+  syncConfiguredProviders(pi as any, {
+    providers: {
+      "codex-json": {
+        baseUrl: "https://chatgpt.com/backend-api",
+        api: "openai-codex-responses",
+        oauthProvider: "openai-codex",
+        oauthJsonPath: "/tmp/oauth.json",
+        headers: { "X-Test": "1" },
+        models: [],
+      },
+    },
+  });
+  assert(!!registered?.auth?.apiKey, "OAuth JSON path registers file-backed auth");
+  assert(!registered?.auth?.oauth, "OAuth JSON path does not register browser login");
+  assert(registered?.headers?.["X-Test"] === "1", "OAuth provider registration preserves custom headers");
+}
+
+// ─── Configured API-key providers are registered immediately ─────
+{
+  let registered: any;
+  const pi = {
+    registerProvider(provider: unknown) {
+      registered = provider;
+    },
+    unregisterProvider() {},
+  };
+  syncConfiguredProviders(pi as any, {
+    providers: {
+      dgx: {
+        baseUrl: "http://int0v.cd.zzdt.qihoo.net:18888/v1",
+        api: "openai-completions",
+        authHeader: true,
+        models: [
+          {
+            id: "deepseek-v4-flash-0731",
+            name: "DeepSeek V4 Flash 0731",
+            reasoning: true,
+            input: ["text"],
+            contextWindow: 1000000,
+            maxTokens: 384000,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          },
+        ],
+      },
+    },
+  });
+  assert(registered?.id === "dgx", "configured API-key provider is registered as a runtime provider");
+  assert(registered?.getModels?.()[0]?.id === "deepseek-v4-flash-0731", "configured API-key provider exposes configured models");
+  assert(!!registered?.auth?.apiKey, "configured API-key provider reports configured auth");
+  const resolved = await registered?.auth?.apiKey?.resolve?.({});
+  assert(resolved?.auth?.apiKey === "unused", "configured API-key provider supplies a placeholder key to Pi API implementations");
+  assert(resolved?.auth?.headers?.Authorization === null, "configured API-key provider suppresses the Authorization header");
+}
+
+// ─── Explicit OAuth JSON path failures are surfaced ─────────────
+{
+  let threw = false;
+  try {
+    readOAuthCredential("codex-json", "openai-codex", "/tmp/pi-custom-provider-missing-oauth-json-file.json");
+  } catch {
+    threw = true;
+  }
+  assert(threw, "missing explicit OAuth JSON file throws instead of falling back to API-key discovery");
+}
+
+// ─── Pasted OAuth JSON imports into Pi auth.json ─────────────────
+{
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-custom-provider-auth-"));
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    importPastedOAuthJson(
+      "codex-pasted",
+      "openai-codex",
+      JSON.stringify({
+        tokens: {
+          access_token: "access-from-paste",
+          refresh_token: "refresh-from-paste",
+          expires_at: 1798790400000,
+        },
+      }),
+    );
+    const auth = JSON.parse(fs.readFileSync(path.join(agentDir, "auth.json"), "utf-8"));
+    assert(auth["codex-pasted"]?.type === "oauth", "pasted OAuth JSON is stored as Pi OAuth");
+    assert(auth["codex-pasted"]?.access === "access-from-paste", "pasted OAuth JSON is stored under provider id");
+    assert(!fs.existsSync(path.join(agentDir, "oauth-json")), "pasted OAuth JSON does not create plugin-owned credential files");
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
 }
 
 // ─── Catalog URL suggestions preserve distinct full model IDs ───
@@ -272,7 +555,7 @@ function assert(cond: boolean, msg: string) {
 
 // ─── Pi recommendations: model id first, URL suggestions second ──
 {
-  const supportedApis = new Set<ModelAPI>([
+  const supportedApis = new Set<KnownApi>([
     "openai-completions",
     "openai-responses",
     "anthropic-messages",
@@ -287,7 +570,7 @@ function assert(cond: boolean, msg: string) {
     .filter((provider) => provider.baseUrl)
     .map((provider) => ({
       provider,
-      model: provider.getModels().find((model) => supportedApis.has(model.api as ModelAPI) && model.compat),
+      model: provider.getModels().find((model) => supportedApis.has(model.api as KnownApi) && model.compat),
     }))
     .find((entry) => entry.model);
 
@@ -295,7 +578,7 @@ function assert(cond: boolean, msg: string) {
   if (source?.model && source.provider.baseUrl) {
     const candidates = recommendModels([{ id: source.model.id, name: source.model.id }], "custom-provider", {
       baseUrl: source.provider.baseUrl,
-      api: source.model.api as ModelAPI,
+      api: source.model.api as KnownApi,
       models: [],
     });
     assert(candidates[0]?.suggestedBy === "model-id", "model-id match stays first in candidate list");
@@ -493,12 +776,13 @@ function assert(cond: boolean, msg: string) {
   assert(s.discoveredModels[0].selected === true, "space toggles selection");
 }
 
-// ─── Test 11: Model editor configures compat without JSON ────────
+// ─── Test 11: Model editor writes compat as one JSON object ──────
 {
   const s = createWizardState([]);
   s.step = "edit_model";
   s.editingModelIdx = 0;
   s.editFieldIdx = 6;
+  s.selectModelsFrom = "edit_models";
   s.discoveredModels = [
     {
       id: "m1",
@@ -513,11 +797,11 @@ function assert(cond: boolean, msg: string) {
   ];
   handleWizardInput(s, mockEnter());
   assert(s.step === "edit_compat", "opens compatibility editor");
-  const save = handleWizardInput(s, "\x1b[C");
-  assert(save?.type === "render", "compatibility changes auto-save immediately");
-  handleWizardInput(s, mockEnter());
-  assert(s.step === "edit_model", "enter only returns from compatibility editing");
-  assert(s.discoveredModels[0].compat?.supportsStore === true, "saves compatibility toggle without JSON");
+  for (const char of '{"supportsStore":true}') handleWizardInput(s, char);
+  const save = handleWizardInput(s, mockEnter());
+  assert(save?.type === "save_models", "compatibility JSON saves existing provider models");
+  assert(s.step === "edit_model", "valid compatibility JSON returns to model editing");
+  assert(s.discoveredModels[0].compat?.supportsStore === true, "saves compatibility JSON");
 }
 
 // ─── Complete model presets are ranked and explicitly applied ──
@@ -588,15 +872,11 @@ function assert(cond: boolean, msg: string) {
   handleWizardInput(s, "e");
   s.editFieldIdx = 6;
   handleWizardInput(s, mockEnter());
-  handleWizardInput(s, "p");
-  handleWizardInput(s, mockEsc());
-  assert(s.step === "edit_compat", "escaping a preset opened from compatibility returns to compatibility");
-  handleWizardInput(s, "x");
-  handleWizardInput(s, mockEnter());
-  assert(!s.discoveredModels[0].compat, "x clears all compatibility overrides before saving");
+  handleWizardInput(s, "\x15");
+  assert(!s.discoveredModels[0].compat, "Ctrl+U clears all compatibility overrides before saving");
 }
 
-// ─── Object-valued compat fields use a JSON sub-editor ──────────
+// ─── Invalid compat JSON stays in the editor ────────────────────
 {
   const s = createWizardState([]);
   s.step = "edit_model";
@@ -616,16 +896,13 @@ function assert(cond: boolean, msg: string) {
     },
   ];
   handleWizardInput(s, mockEnter());
-  s.compatFieldIdx = compatControlKeys(s.apiType).indexOf("openRouterRouting");
-  handleWizardInput(s, "e");
-  assert(s.step === "edit_compat_json", "e opens JSON editing for object-valued compat fields");
   handleWizardInput(s, "{");
   handleWizardInput(s, mockEnter());
-  assert(s.step === "edit_compat_json" && !!s.compatJsonError, "invalid compat JSON stays open with an error");
+  assert(s.step === "edit_compat" && !!s.compatJsonError, "invalid compat JSON stays open with an error");
   handleWizardInput(s, mockBackspace());
-  for (const char of '{"only":["deepinfra"]}') handleWizardInput(s, char);
+  for (const char of '{"openRouterRouting":{"only":["deepinfra"]}}') handleWizardInput(s, char);
   handleWizardInput(s, mockEnter());
-  assert(s.step === "edit_compat", "valid compat JSON returns to the API-specific compatibility list");
+  assert(s.step === "edit_model", "valid compat JSON returns to model editing");
   assert(
     JSON.stringify(s.compatDraft.openRouterRouting) === '{"only":["deepinfra"]}',
     "JSON compat values are applied as objects",
@@ -705,12 +982,123 @@ function assert(cond: boolean, msg: string) {
   assert(s.step === "select_models", "esc from manage_config → select_models");
 }
 
+// ─── OAuth prompt callback race ─────────────────────────────────
+{
+  const abort = new AbortController();
+  let inputCalled = false;
+  const auth = createAuthInteraction(
+    { exec: async () => undefined } as any,
+    {
+      ui: {
+        select: async () => undefined,
+        input: async () => {
+          inputCalled = true;
+          return "manual-code";
+        },
+        notify: () => {},
+      },
+    } as any,
+    50,
+  );
+  const prompt = auth
+    .prompt({ type: "manual_code", message: "Paste callback", signal: abort.signal })
+    .then(() => false, () => true);
+  setTimeout(() => abort.abort(), 5);
+  assert(await prompt, "manual OAuth prompt rejects when callback wins");
+  assert(!inputCalled, "manual OAuth input is not opened before the delay");
+}
+
+{
+  const abort = new AbortController();
+  let inputCalled = false;
+  let signalForwarded = false;
+  const auth = createAuthInteraction(
+    { exec: async () => undefined } as any,
+    {
+      ui: {
+        select: async () => undefined,
+        input: async (_title: string, _placeholder?: string, opts?: { signal?: AbortSignal }) => {
+          inputCalled = true;
+          signalForwarded = opts?.signal === abort.signal;
+          return "manual-code";
+        },
+        notify: () => {},
+      },
+    } as any,
+    5,
+  );
+  const value = await auth.prompt({ type: "manual_code", message: "Paste callback", signal: abort.signal });
+  assert(value === "manual-code", "manual OAuth prompt still works after the delay");
+  assert(inputCalled, "manual OAuth input opens after the delay");
+  assert(signalForwarded, "manual OAuth input receives Pi's abort signal");
+}
+
+{
+  let selectCalled = false;
+  const auth = createAuthInteraction(
+    { exec: async () => undefined } as any,
+    {
+      ui: {
+        select: async () => {
+          selectCalled = true;
+          return undefined;
+        },
+        input: async () => undefined,
+        notify: () => {},
+      },
+    } as any,
+    { autoSelectFirst: true },
+  );
+  const value = await auth.prompt({
+    type: "select",
+    message: "Choose login method",
+    options: [
+      { id: "browser", label: "Browser login" },
+      { id: "device_code", label: "Device code" },
+    ],
+  });
+  assert(value === "browser", "OAuth login auto-selects the first Pi auth method inside the wizard");
+  assert(!selectCalled, "OAuth login does not open a nested select dialog inside the wizard");
+}
+
+{
+  let inputCalled = false;
+  let customManualCalled = false;
+  const auth = createAuthInteraction(
+    { exec: async () => undefined } as any,
+    {
+      ui: {
+        select: async () => undefined,
+        input: async () => {
+          inputCalled = true;
+          return undefined;
+        },
+        notify: () => {},
+      },
+    } as any,
+    {
+      manualCodePromptDelayMs: 5,
+      manualCodePrompt: async (_prompt, delayMs) => {
+        customManualCalled = delayMs === 5;
+        return "manual-code";
+      },
+    },
+  );
+  const value = await auth.prompt({ type: "manual_code", message: "Paste callback" });
+  assert(value === "manual-code", "OAuth manual fallback can be handled by the wizard");
+  assert(customManualCalled, "OAuth manual fallback receives the configured delay");
+  assert(!inputCalled, "OAuth manual fallback does not open a nested input dialog inside the wizard");
+}
+
 // ─── Result ──────────────────────────────────────────────────────
 console.log(`\n${failed === 0 ? "ALL TESTS PASSED" : `${failed} TESTS FAILED`}`);
 process.exitCode = failed > 0 ? 1 : 0;
 
 function mockUp() {
   return "\x1b[A";
+}
+function mockDown() {
+  return "\x1b[B";
 }
 function mockTab() {
   return "\t";

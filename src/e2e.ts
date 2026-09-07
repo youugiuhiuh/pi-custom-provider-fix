@@ -51,10 +51,11 @@ t("CREATE: wizard saves apiKey", () => {
   handleWizardInput(s, ENTER);
   s.baseUrl = "https://test.com/v1";
   handleWizardInput(s, ENTER);
+  for (const c of "test-prov") handleWizardInput(s, c);
+  handleWizardInput(s, ENTER);
+  handleWizardInput(s, ENTER);
   for (const c of "sk-test-key-123") handleWizardInput(s, c);
   handleWizardInput(s, ENTER);
-  for (const c of "test-prov") handleWizardInput(s, c);
-  handleWizardInput(s, ENTER); // discover
 
   // Simulate discovered models + save
   s.discoveredModels = [M("m1", true), M("m2", false)];
@@ -235,8 +236,10 @@ t("ESC: navigation chain", () => {
   const cases: [string, string][] = [
     ["api_type", "choose_provider"],
     ["base_url", "api_type"],
-    ["api_key", "base_url"],
-    ["provider_id", "api_key"],
+    ["provider_id", "base_url"],
+    ["oauth_provider", "provider_id"],
+    ["oauth_json_path", "oauth_provider"],
+    ["api_key", "oauth_provider"],
     ["edit_model", "select_models"],
     ["review", "select_models"],
     ["manage_config", "select_models"],

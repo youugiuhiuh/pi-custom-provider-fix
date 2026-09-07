@@ -1,28 +1,43 @@
 // pi-custom-provider wizard
 import { Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type {
-  AnthropicMessagesCompat,
-  BedrockCompat,
-  OpenAICompletionsCompat,
-  OpenAIResponsesCompat,
-} from "@earendil-works/pi-ai";
-import type { ModelAPI, ModelCost, ThinkingLevelMap } from "./types";
-import { providerCompatKeys } from "./types";
+import type { Api, KnownApi, Model, ModelCost, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { listModelPresets, type ModelPreset } from "./discovery";
+import {
+  API_CHOICES,
+  apiChoiceIndex,
+  apiLabel,
+  defaultApiChoice,
+  oauthProviderChoicesForApi,
+  oauthProviderLabel,
+  OAUTH_PROVIDER_CHOICES,
+} from "./pi-catalog";
+import {
+  confirmSetupApi,
+  moveManagedOAuthProvider,
+  moveSetupApi,
+  moveSetupOAuthProvider,
+  resetProviderSetup,
+  selectedManagedOAuthProvider,
+  selectedSetupOAuthProvider,
+  setManagedApiChoice,
+  setSetupOAuthProvider,
+} from "./provider-flow";
+import { looksLikeOAuthJsonText } from "./oauth";
 
 export type WizardStep =
   | "choose_provider"
   | "confirm_delete_provider"
   | "api_type"
   | "base_url"
+  | "oauth_provider"
+  | "oauth_json_path"
   | "api_key"
   | "provider_id"
   | "discovering"
   | "select_models"
   | "edit_model"
   | "edit_compat"
-  | "edit_compat_json"
   | "model_preset"
   | "review"
   | "manage_config";
@@ -30,12 +45,14 @@ export type WizardStep =
 export interface WizardModelItem {
   id: string;
   name: string;
+  baseUrl?: string;
   reasoning: boolean;
-  input: string[];
+  input: Model<Api>["input"];
   contextWindow: number;
   maxTokens: number;
   cost?: ModelCost;
   thinkingLevelMap?: ThinkingLevelMap;
+  headers?: Record<string, string>;
   compat?: Record<string, unknown>;
   suggestedBy?: "api" | "model-id" | "base-url";
   selected: boolean;
@@ -46,19 +63,24 @@ export interface WizardState {
   step: WizardStep;
   existingProviders: Array<{ id: string; name?: string; modelCount: number }>;
   chosenProviderIdx: number;
-  apiType: ModelAPI;
+  apiType: KnownApi;
   apiTypeIdx: number;
   baseUrl: string;
   apiKey: string;
+  oauthProviderIdx: number;
+  oauthJsonPath: string;
+  oauthJsonRaw: string;
   providerId: string;
   providerOriginalId: string;
   providerName: string;
   mfIdx: number;
+  mfOAuthProvider: number;
+  mfOAuthJsonPath: string;
+  mfOAuthJsonRaw: string;
   mfAuth: number;
-  mfDevRole: number;
-  mfReasonEffort: number;
-  mfStrict: number;
   mfHeaders: string;
+  mfEditing: boolean;
+  mfEditValue: string;
   discoveredModels: WizardModelItem[];
   modelCursor: number;
   modelFilter: string;
@@ -67,6 +89,10 @@ export interface WizardState {
   addingCustom: boolean;
   discoveryStatus: string;
   discoveryLoading: boolean;
+  oauthManualVisible: boolean;
+  oauthManualMessage: string;
+  oauthManualPlaceholder: string;
+  oauthManualInput: string;
   editingModelIdx: number;
   editFieldIdx: number;
   editContextWindow: string;
@@ -76,7 +102,6 @@ export interface WizardState {
   editCostInput: string;
   editCostOutput: string;
   editThinkingMap: string;
-  compatFieldIdx: number;
   compatDraft: Record<string, unknown>;
   compatJsonDraft: string;
   compatJsonError: string;
@@ -85,7 +110,6 @@ export interface WizardState {
   modelPresetFiltering: boolean;
   modelPresetLabel: string;
   modelPresetDraft?: ModelPreset["model"];
-  modelPresetBackStep: "edit_model" | "edit_compat";
   statusMessage: string;
   statusType: "info" | "success" | "warning" | "error" | "";
 }
@@ -93,146 +117,6 @@ export interface WizardState {
 export interface WizardAction {
   type: string;
   payload?: unknown;
-}
-
-const APIS: ModelAPI[] = [
-  "openai-completions",
-  "openai-responses",
-  "anthropic-messages",
-  "google-generative-ai",
-  "mistral-conversations",
-  "azure-openai-responses",
-  "openai-codex-responses",
-  "bedrock-converse-stream",
-  "google-vertex",
-];
-const AL: Record<string, string> = {
-  "openai-completions": "OpenAI Chat Completions [Key]",
-  "openai-responses": "OpenAI Responses [Key]",
-  "anthropic-messages": "Anthropic Messages [Key]",
-  "google-generative-ai": "Google Generative AI [Key]",
-  "mistral-conversations": "Mistral Conversations [Key]",
-  "azure-openai-responses": "Azure OpenAI Responses [Key]",
-  "openai-codex-responses": "OpenAI Codex Responses [OAuth]",
-  "bedrock-converse-stream": "Amazon Bedrock [AWS]",
-  "google-vertex": "Google Vertex AI [OAuth]",
-};
-
-type CompatChoiceControl<K extends string = string> = {
-  key: K;
-  label: string;
-  values: readonly (boolean | string | undefined)[];
-};
-type CompatJsonControl<K extends string = string> = { key: K; label: string; editor: "json" };
-type CompatControl<K extends string = string> = CompatChoiceControl<K> | CompatJsonControl<K>;
-const BOOL: readonly (boolean | undefined)[] = [undefined, true, false];
-const OPENAI_COMPLETIONS_COMPAT = [
-  { key: "supportsStore", label: "Store requests", values: BOOL },
-  { key: "supportsDeveloperRole", label: "Developer role", values: BOOL },
-  { key: "supportsReasoningEffort", label: "Reasoning effort", values: BOOL },
-  { key: "supportsUsageInStreaming", label: "Streaming usage", values: BOOL },
-  { key: "maxTokensField", label: "Max tokens field", values: [undefined, "max_tokens", "max_completion_tokens"] },
-  { key: "requiresToolResultName", label: "Tool result name", values: BOOL },
-  { key: "requiresAssistantAfterToolResult", label: "Assistant after tool", values: BOOL },
-  { key: "requiresThinkingAsText", label: "Thinking as text", values: BOOL },
-  { key: "requiresReasoningContentOnAssistantMessages", label: "Reasoning content replay", values: BOOL },
-  {
-    key: "thinkingFormat",
-    label: "Thinking format",
-    values: [
-      undefined,
-      "openai",
-      "openrouter",
-      "together",
-      "deepseek",
-      "zai",
-      "qwen",
-      "chat-template",
-      "qwen-chat-template",
-      "string-thinking",
-      "ant-ling",
-    ],
-  },
-  { key: "chatTemplateKwargs", label: "Chat template kwargs", editor: "json" },
-  { key: "openRouterRouting", label: "OpenRouter routing", editor: "json" },
-  { key: "vercelGatewayRouting", label: "Vercel gateway routing", editor: "json" },
-  { key: "zaiToolStream", label: "z.ai tool streaming", values: BOOL },
-  { key: "cacheControlFormat", label: "Cache control", values: [undefined, "anthropic"] },
-  { key: "supportsOpenAIGrammarTools", label: "OpenAI grammar tools", values: BOOL },
-  { key: "supportsStrictMode", label: "Strict tool schema", values: BOOL },
-  { key: "sendSessionAffinityHeaders", label: "Session affinity headers", values: BOOL },
-  {
-    key: "sessionAffinityFormat",
-    label: "Session affinity format",
-    values: [undefined, "openai", "openai-nosession", "openrouter"],
-  },
-  { key: "deferredToolsMode", label: "Deferred tools mode", values: [undefined, "kimi"] },
-  { key: "supportsLongCacheRetention", label: "Long cache retention", values: BOOL },
-] as const satisfies readonly CompatControl<keyof OpenAICompletionsCompat>[];
-
-const OPENAI_RESPONSES_COMPAT = [
-  { key: "supportsDeveloperRole", label: "Developer role", values: BOOL },
-  {
-    key: "sessionAffinityFormat",
-    label: "Session affinity format",
-    values: [undefined, "openai", "openai-nosession", "openrouter"],
-  },
-  { key: "supportsLongCacheRetention", label: "Long cache retention", values: BOOL },
-  { key: "supportsStrictMode", label: "Strict tool schema", values: BOOL },
-  { key: "supportsOpenAIGrammarTools", label: "OpenAI grammar tools", values: BOOL },
-  { key: "supportsToolSearch", label: "Native tool search", values: BOOL },
-  { key: "supportsExplicitPromptCacheMode", label: "Explicit prompt cache", values: BOOL },
-] as const satisfies readonly CompatControl<keyof OpenAIResponsesCompat>[];
-
-const ANTHROPIC_COMPAT = [
-  { key: "supportsEagerToolInputStreaming", label: "Eager tool input streaming", values: BOOL },
-  { key: "supportsCacheControlOnTools", label: "Cache control on tools", values: BOOL },
-  { key: "supportsTemperature", label: "Temperature", values: BOOL },
-  { key: "forceAdaptiveThinking", label: "Adaptive thinking", values: BOOL },
-  { key: "allowEmptySignature", label: "Allow empty signature", values: BOOL },
-  { key: "supportsStrictTools", label: "Strict tool schema", values: BOOL },
-  { key: "supportsToolReferences", label: "Tool references", values: BOOL },
-  { key: "supportsLongCacheRetention", label: "Long cache retention", values: BOOL },
-  { key: "sendSessionAffinityHeaders", label: "Session affinity headers", values: BOOL },
-] as const satisfies readonly CompatControl<keyof AnthropicMessagesCompat>[];
-
-const BEDROCK_COMPAT = [
-  { key: "supportsStrictMode", label: "Strict tool schema", values: BOOL },
-] as const satisfies readonly CompatControl<keyof BedrockCompat>[];
-
-type AssertNoMissingCompatKeys<T extends never> = T;
-type _AllOpenAICompletionsCompatKeys = AssertNoMissingCompatKeys<
-  Exclude<keyof OpenAICompletionsCompat, (typeof OPENAI_COMPLETIONS_COMPAT)[number]["key"]>
->;
-type _AllOpenAIResponsesCompatKeys = AssertNoMissingCompatKeys<
-  Exclude<keyof OpenAIResponsesCompat, (typeof OPENAI_RESPONSES_COMPAT)[number]["key"]>
->;
-type _AllAnthropicCompatKeys = AssertNoMissingCompatKeys<
-  Exclude<keyof AnthropicMessagesCompat, (typeof ANTHROPIC_COMPAT)[number]["key"]>
->;
-type _AllBedrockCompatKeys = AssertNoMissingCompatKeys<
-  Exclude<keyof BedrockCompat, (typeof BEDROCK_COMPAT)[number]["key"]>
->;
-
-function compatControls(api: ModelAPI): readonly CompatControl[] {
-  if (api === "anthropic-messages") return ANTHROPIC_COMPAT;
-  if (api === "openai-completions") return OPENAI_COMPLETIONS_COMPAT;
-  if (api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses") {
-    return OPENAI_RESPONSES_COMPAT;
-  }
-  if (api === "bedrock-converse-stream") return BEDROCK_COMPAT;
-  return [];
-}
-
-export function compatControlKeys(api: ModelAPI): string[] {
-  return compatControls(api).map((control) => control.key);
-}
-
-function compatValue(v: unknown): string {
-  if (v === undefined) return "Auto";
-  if (v === true) return "Yes";
-  if (v === false) return "No";
-  return typeof v === "object" ? JSON.stringify(v) : String(v);
 }
 
 type Th = ReturnType<typeof mkTh>;
@@ -254,23 +138,29 @@ function ft(n: number): string {
 export function createWizardState(
   existing: Array<{ id: string; name?: string; modelCount: number }> = [],
 ): WizardState {
+  const defaultApi = defaultApiChoice();
   return {
     step: "choose_provider",
     existingProviders: existing,
     chosenProviderIdx: existing.length > 0 ? 0 : -1,
-    apiType: "openai-completions",
-    apiTypeIdx: 0,
+    apiType: defaultApi,
+    apiTypeIdx: apiChoiceIndex(defaultApi),
     baseUrl: "",
     apiKey: "",
+    oauthProviderIdx: 0,
+    oauthJsonPath: "",
+    oauthJsonRaw: "",
     providerId: "",
     providerOriginalId: "",
     providerName: "",
     mfIdx: 0,
+    mfOAuthProvider: 0,
+    mfOAuthJsonPath: "",
+    mfOAuthJsonRaw: "",
     mfAuth: 0,
-    mfDevRole: 0,
-    mfReasonEffort: 0,
-    mfStrict: 0,
     mfHeaders: "",
+    mfEditing: false,
+    mfEditValue: "",
     discoveredModels: [],
     modelCursor: 0,
     modelFilter: "",
@@ -279,6 +169,10 @@ export function createWizardState(
     addingCustom: false,
     discoveryStatus: "",
     discoveryLoading: false,
+    oauthManualVisible: false,
+    oauthManualMessage: "",
+    oauthManualPlaceholder: "",
+    oauthManualInput: "",
     editingModelIdx: -1,
     editFieldIdx: 0,
     editContextWindow: "",
@@ -288,7 +182,6 @@ export function createWizardState(
     editCostInput: "",
     editCostOutput: "",
     editThinkingMap: "",
-    compatFieldIdx: 0,
     compatDraft: {},
     compatJsonDraft: "",
     compatJsonError: "",
@@ -297,7 +190,6 @@ export function createWizardState(
     modelPresetFiltering: false,
     modelPresetLabel: "Custom / saved",
     modelPresetDraft: undefined,
-    modelPresetBackStep: "edit_model",
     statusMessage: "",
     statusType: "",
   };
@@ -341,6 +233,12 @@ export function renderWizard(s: WizardState, w: number, t: Theme): string[] {
     case "base_url":
       rUrl(s, wr, th);
       break;
+    case "oauth_provider":
+      rOAuthProvider(s, wr, th);
+      break;
+    case "oauth_json_path":
+      rOAuthJsonPath(s, wr, th);
+      break;
     case "api_key":
       rKey(s, wr, th);
       break;
@@ -352,9 +250,6 @@ export function renderWizard(s: WizardState, w: number, t: Theme): string[] {
       break;
     case "edit_compat":
       rCompat(s, wr, th);
-      break;
-    case "edit_compat_json":
-      rCompatJson(s, wr, th);
       break;
     case "model_preset":
       rModelPreset(s, wr, th);
@@ -373,13 +268,18 @@ export function renderWizard(s: WizardState, w: number, t: Theme): string[] {
 }
 
 function footer(s: WizardState, th: Th): string {
+  if (s.step === "manage_config" && s.mfEditing) {
+    return th.dim("Type value  |  Ctrl+U: clear  |  Enter: save  |  Esc: cancel");
+  }
   const m: Record<string, string> = {
     choose_provider: "Arrows: select  |  Enter: confirm  |  d: delete  |  Esc: quit",
     confirm_delete_provider: "Enter: delete permanently  |  Esc: cancel",
     api_type: "Arrows: navigate  |  Enter: confirm  |  Esc: back",
     base_url: "Type URL  |  Enter/Tab: next  |  Esc: back",
-    api_key: "Type key  |  Tab: next  |  Esc: back",
-    provider_id: "Type ID  |  Tab: discover  |  Esc: back",
+    oauth_provider: "Arrows: choose OAuth provider  |  Enter/Tab: next  |  Esc: back",
+    oauth_json_path: "Paste OAuth JSON, type external path, or leave empty for Pi OAuth  |  Enter/Tab: discover  |  Esc: back",
+    api_key: "Type key  |  Enter/Tab: discover  |  Esc: back",
+    provider_id: "Type ID  |  Enter/Tab: next  |  Esc: back",
     discovering: "...",
     select_models:
       s.selectModelsFrom === "edit_models"
@@ -388,13 +288,14 @@ function footer(s: WizardState, th: Th): string {
           ? "Auto-save  |  Space: toggle  |  a: select all  |  /: filter  |  e: edit  |  Esc: back"
           : "Enter: save  |  Space: toggle  |  a: select all  |  n: add custom  |  /: filter  |  Esc: back",
     edit_model: "Auto-save  |  p: preset  |  Arrows: field  |  L/R: toggle  |  type: edit  |  Enter/Esc: done",
-    edit_compat:
-      "Auto-save  |  p: preset  |  x: reset all  |  e: edit JSON  |  Arrows: select/change  |  Enter/Esc: back",
-    edit_compat_json: "Auto-save when JSON is valid  |  Enter/Esc: back",
+    edit_compat: "Type JSON object  |  Ctrl+U: clear  |  Enter: save  |  Esc: back",
     model_preset: "Arrows: select  |  /: filter  |  Enter: apply model  |  Esc: back",
     review: "Enter: save  |  Esc: back",
-    manage_config: "Auto-save  |  Arrows: field  |  L/R: toggle  |  type: edit  |  Enter/Esc: done",
+    manage_config: "Arrows: field  |  Enter: edit/done  |  L/R: toggle  |  Esc: done",
   };
+  if (s.step === "discovering" && s.oauthManualVisible) {
+    return th.dim("Paste redirect URL/code  |  Enter: submit  |  Ctrl+U: clear  |  Esc: cancel");
+  }
   if (s.step === "select_models" && (s.modelFiltering || s.modelFilter)) {
     return th.accent(`  ${s.modelFilter}_`) + "\n" + th.dim(m[s.step] || "");
   }
@@ -471,19 +372,41 @@ function rDisc(s: WizardState, w: (t: string) => void, th: Th) {
   w("");
   if (s.discoveryLoading) w(th.muted(`  ${s.discoveryStatus || "Contacting API..."}`));
   else if (s.discoveryStatus) w(th.accent(`  ${s.discoveryStatus}`));
+  if (s.oauthManualVisible) {
+    w("");
+    w(th.warning("  Manual OAuth fallback"));
+    if (s.oauthManualMessage) w(th.muted(`  ${s.oauthManualMessage}`));
+    if (s.oauthManualPlaceholder) w(th.muted(`  Expected: ${s.oauthManualPlaceholder}`));
+    w(th.accent(`  > ${s.oauthManualInput}|`));
+  }
 }
 function rApi(s: WizardState, w: (t: string) => void, th: Th) {
   w(th.bold("  API Type"));
   w("");
-  APIS.forEach((a, i) => {
+  API_CHOICES.forEach((a, i) => {
     const c = i === s.apiTypeIdx;
-    w(`${c ? th.accent("> ") : "  "}${c ? th.bold(AL[a]) : AL[a]}`);
+    w(`${c ? th.accent("> ") : "  "}${c ? th.bold(apiLabel(a)) : apiLabel(a)}`);
   });
 }
 function rUrl(s: WizardState, w: (t: string) => void, th: Th) {
   w(th.bold(`  Base URL  (${s.apiType})`));
   w("");
   w(th.accent(`  > ${s.baseUrl}|`));
+}
+function rOAuthProvider(s: WizardState, w: (t: string) => void, th: Th) {
+  w(th.bold("  OAuth Provider"));
+  w("");
+  oauthProviderChoicesForApi(s.apiType).forEach((provider) => {
+    const c = provider === selectedSetupOAuthProvider(s);
+    w(`${c ? th.accent("> ") : "  "}${c ? th.bold(oauthProviderLabel(provider)) : oauthProviderLabel(provider)}`);
+  });
+}
+function rOAuthJsonPath(s: WizardState, w: (t: string) => void, th: Th) {
+  w(th.bold(`  OAuth JSON  (${oauthProviderLabel(selectedSetupOAuthProvider(s))})`));
+  w("");
+  w(th.accent(`  > ${oauthJsonDisplay(s.oauthJsonPath, s.oauthJsonRaw)}|`));
+  w("");
+  w(th.muted("  Empty uses Pi OAuth for this provider. Pasted JSON is imported into Pi auth.json."));
 }
 function rKey(s: WizardState, w: (t: string) => void, th: Th) {
   w(th.bold("  API Key"));
@@ -512,9 +435,8 @@ function rEdit(s: WizardState, w: (t: string) => void, th: Th) {
   fl("Max Tokens", s.editMaxTokens || String(m.maxTokens), false, 3);
   fl("Cost ($/M in)", s.editCostInput || (m.cost ? String(m.cost.input) : "0"), false, 4);
   fl("Cost ($/M out)", s.editCostOutput || (m.cost ? String(m.cost.output) : "0"), false, 5);
-  const compatFields = compatControls(s.apiType);
-  const compatLabel = compatFields.length ? (Object.keys(s.compatDraft).length ? "Configured" : "Auto") : "N/A";
-  fl("Compatibility", compatLabel, compatFields.length > 0, 6);
+  const compatLabel = Object.keys(s.compatDraft).length ? "Configured" : "Auto";
+  fl("Compatibility", compatLabel, false, 6);
   fl(
     "Thinking (JSON)",
     s.editThinkingMap || (m.thinkingLevelMap ? JSON.stringify(m.thinkingLevelMap) : "(auto)"),
@@ -524,37 +446,9 @@ function rEdit(s: WizardState, w: (t: string) => void, th: Th) {
 }
 
 function rCompat(s: WizardState, w: (t: string) => void, th: Th) {
-  const fields = compatControls(s.apiType),
-    model = s.discoveredModels[s.editingModelIdx];
+  const model = s.discoveredModels[s.editingModelIdx];
   w(th.bold(`  Compatibility: ${model?.id || s.providerId}`));
-  w(th.muted(`  ${s.apiType} · ${fields.length} API-specific options`));
-  w("");
-  if (!fields.length) {
-    w(th.muted(`  ${s.apiType} has no model compat overrides in pi-ai.`));
-    return;
-  }
-  w(th.muted("  Press p to apply a complete pi-ai model preset, or x to reset compat."));
-  w("");
-  const start = Math.max(0, Math.min(s.compatFieldIdx - 4, Math.max(0, fields.length - 10)));
-  fields.slice(start, start + 10).forEach((field, i) => {
-    const idx = start + i,
-      selected = idx === s.compatFieldIdx;
-    const rawValue = compatValue(s.compatDraft[field.key]),
-      value = rawValue.length > 56 ? `${rawValue.slice(0, 55)}…` : rawValue,
-      hint = "editor" in field ? " e" : " ←→";
-    w(
-      `${selected ? th.accent("> ") : "  "}${selected ? th.bold(field.label) : field.label}: ${th.accent(value)}${selected ? th.dim(hint) : ""}`,
-    );
-  });
-  w("");
-  w(th.muted("Auto leaves Pi's built-in behavior unchanged."));
-}
-
-function rCompatJson(s: WizardState, w: (t: string) => void, th: Th) {
-  const field = compatControls(s.apiType)[s.compatFieldIdx],
-    model = s.discoveredModels[s.editingModelIdx];
-  w(th.bold(`  ${field?.label || "Compatibility JSON"}: ${model?.id || s.providerId}`));
-  w(th.muted(`  ${s.apiType} · JSON object; empty input clears this field`));
+  w(th.muted(`  ${s.apiType} · model.compat JSON`));
   w("");
   w(th.accent(`  > ${s.compatJsonDraft}|`));
   if (s.compatJsonError) {
@@ -592,6 +486,11 @@ function rRev(s: WizardState, w: (t: string) => void, th: Th) {
   w(`${th.muted("  Provider:")}  ${th.bold(s.providerId)}`);
   w(`${th.muted("  API:")}       ${s.apiType}`);
   w(`${th.muted("  URL:")}       ${s.baseUrl}`);
+  const oauthProvider = selectedSetupOAuthProvider(s);
+  if (oauthProvider !== "none") {
+    const json = s.oauthJsonRaw ? "pasted OAuth JSON -> Pi auth.json" : s.oauthJsonPath;
+    w(`${th.muted("  OAuth:")}     ${oauthProviderLabel(oauthProvider)}${json ? ` (${json})` : ""}`);
+  }
   const sel = s.discoveredModels.filter((m) => m.selected);
   w(`${th.muted("  Models:")}     ${sel.length} selected`);
   sel
@@ -603,30 +502,24 @@ function rRev(s: WizardState, w: (t: string) => void, th: Th) {
 
 function rCfg(s: WizardState, w: (t: string) => void, th: Th) {
   w(th.bold(`  Edit Provider: ${s.providerName || s.providerId}`));
-  w(th.success("  Changes are saved immediately."));
+  w(th.success("  Changes are saved when confirmed."));
   w("");
   const fl = (l: string, v: string, i: number, h?: string) => {
     const f = i === s.mfIdx;
-    w(`${f ? th.accent("> ") : "  "}${f ? th.bold(l) : l}: ${th.accent(v)}${f && h ? th.dim(` ${h}`) : ""}`);
+    const editing = f && s.mfEditing;
+    const value = editing ? `${s.mfEditValue}_` : v;
+    w(`${f ? th.accent("> ") : "  "}${f ? th.bold(l) : l}: ${th.accent(value)}${f && h ? th.dim(` ${h}`) : ""}`);
   };
   fl("Provider ID", s.providerId, 0);
   fl("Display Name", s.providerName || "(same as ID)", 1);
-  fl("API Type", APIS[s.apiTypeIdx], 2, "\u2190\u2192");
+  fl("API Type", s.apiType, 2, "\u2190\u2192");
   fl("Base URL", s.baseUrl, 3);
   fl("API Key", s.apiKey ? "*".repeat(Math.min(s.apiKey.length, 20)) : "(not set)", 4);
+  fl("OAuth Provider", oauthProviderLabel(OAUTH_PROVIDER_CHOICES[s.mfOAuthProvider]), 5, "\u2190\u2192");
+  fl("OAuth JSON", oauthJsonDisplay(s.mfOAuthJsonPath, s.mfOAuthJsonRaw, "(not set)"), 6);
   const al = ["Auto", "Bearer", "Custom"];
-  fl("Auth Method", al[s.mfAuth], 5, "\u2190\u2192");
-  const yn = (v: number) => (v === 1 ? "Yes" : v === 2 ? "No" : "Auto");
-  const compat = providerCompatKeys(s.apiType);
-  fl("Dev Role", compat.developerRole ? yn(s.mfDevRole) : "N/A", 6, compat.developerRole ? "\u2190\u2192" : undefined);
-  fl(
-    "Reasoning Effort",
-    compat.reasoningEffort ? yn(s.mfReasonEffort) : "N/A",
-    7,
-    compat.reasoningEffort ? "\u2190\u2192" : undefined,
-  );
-  fl("Strict Tools", compat.strict ? yn(s.mfStrict) : "N/A", 8, compat.strict ? "\u2190\u2192" : undefined);
-  fl("Headers (JSON)", s.mfHeaders || "(none)", 9);
+  fl("Auth Method", al[s.mfAuth], 7, "\u2190\u2192");
+  fl("Headers (JSON)", s.mfHeaders || "(none)", 8);
 }
 
 // ─── Input ───────────────────────────────────────────────────────
@@ -638,6 +531,7 @@ export function handleWizardInput(s: WizardState, d: string): WizardAction | nul
     s.modelPresetCursor = 0;
     return { type: "render" };
   }
+  if (matchesKey(d, Key.escape) && s.step === "manage_config" && s.mfEditing) return hCfg(s, d);
   if (matchesKey(d, Key.escape)) return esc(s);
   if (matchesKey(d, "ctrl+c") && s.step === "choose_provider") return { type: "close" };
   switch (s.step) {
@@ -651,6 +545,10 @@ export function handleWizardInput(s: WizardState, d: string): WizardAction | nul
       return hApi(s, d);
     case "base_url":
       return hUrl(s, d);
+    case "oauth_provider":
+      return hOAuthProvider(s, d);
+    case "oauth_json_path":
+      return hOAuthJsonPath(s, d);
     case "api_key":
       return hKey(s, d);
     case "provider_id":
@@ -659,8 +557,6 @@ export function handleWizardInput(s: WizardState, d: string): WizardAction | nul
       return hEdit(s, d);
     case "edit_compat":
       return hCompat(s, d);
-    case "edit_compat_json":
-      return hCompatJson(s, d);
     case "model_preset":
       return hModelPreset(s, d);
     case "review":
@@ -676,23 +572,29 @@ const BACK: Record<string, string> = {
   confirm_delete_provider: "choose_provider",
   api_type: "choose_provider",
   base_url: "api_type",
-  api_key: "base_url",
-  provider_id: "api_key",
+  provider_id: "base_url",
+  oauth_provider: "provider_id",
+  oauth_json_path: "oauth_provider",
+  api_key: "oauth_provider",
   edit_model: "select_models",
   edit_compat: "edit_model",
-  edit_compat_json: "edit_compat",
   review: "select_models",
   manage_config: "select_models",
 };
 
 function esc(s: WizardState): WizardAction | null {
   if (s.step === "model_preset") {
-    s.step = s.modelPresetBackStep;
+    s.step = "edit_model";
     s.statusMessage = "";
     return { type: "render" };
   }
   if (s.step === "select_models") {
     s.step = "choose_provider";
+    s.statusMessage = "";
+    return { type: "render" };
+  }
+  if (s.step === "api_key" && selectedSetupOAuthProvider(s) !== "none") {
+    s.step = "oauth_json_path";
     s.statusMessage = "";
     return { type: "render" };
   }
@@ -721,13 +623,7 @@ function hChoose(s: WizardState, d: string): WizardAction | null {
   if (matchesKey(d, Key.enter) || d === "\r") {
     if (s.chosenProviderIdx === -1) {
       s.step = "api_type";
-      s.apiTypeIdx = 0;
-      s.apiType = APIS[0];
-      s.baseUrl = "";
-      s.apiKey = "";
-      s.providerId = "";
-      s.providerOriginalId = "";
-      s.providerName = "";
+      resetProviderSetup(s);
       return { type: "render" };
     }
     const p = s.existingProviders[s.chosenProviderIdx];
@@ -893,7 +789,6 @@ function ldEdit(s: WizardState) {
   s.editCostInput = m.cost ? String(m.cost.input) : "";
   s.editCostOutput = m.cost ? String(m.cost.output) : "";
   s.editThinkingMap = m.thinkingLevelMap ? JSON.stringify(m.thinkingLevelMap) : "";
-  s.compatFieldIdx = 0;
   s.compatDraft = { ...(m.compat || {}) };
   s.compatJsonDraft = "";
   s.compatJsonError = "";
@@ -902,14 +797,14 @@ function ldEdit(s: WizardState) {
   s.modelPresetFiltering = false;
   s.modelPresetLabel = "Custom / saved";
   s.modelPresetDraft = undefined;
-  s.modelPresetBackStep = "edit_model";
   s.step = "edit_model";
 }
 
 function hEdit(s: WizardState, d: string): WizardAction | null {
   if (d.toLowerCase() === "p") return openModelPresetPicker(s);
   if (s.editFieldIdx === 6 && (matchesKey(d, Key.enter) || d === "\r")) {
-    if (!compatControls(s.apiType).length) return { type: "render" };
+    s.compatJsonDraft = Object.keys(s.compatDraft).length ? JSON.stringify(s.compatDraft) : "";
+    s.compatJsonError = "";
     s.step = "edit_compat";
     return { type: "render" };
   }
@@ -944,73 +839,34 @@ function hEdit(s: WizardState, d: string): WizardAction | null {
 }
 
 function hCompat(s: WizardState, d: string): WizardAction | null {
-  const fields = compatControls(s.apiType),
-    current = fields[s.compatFieldIdx];
-  if (d.toLowerCase() === "p") return openModelPresetPicker(s);
-  if (d.toLowerCase() === "x") {
+  if (d === "\x15") {
     s.compatDraft = {};
-    s.modelPresetLabel = "Custom";
-    return autosaveEditedModel(s);
-  }
-  if (d.toLowerCase() === "e" && current && "editor" in current) {
-    s.compatJsonDraft = s.compatDraft[current.key] === undefined ? "" : JSON.stringify(s.compatDraft[current.key]);
+    s.compatJsonDraft = "";
     s.compatJsonError = "";
-    s.step = "edit_compat_json";
-    return { type: "render" };
-  }
-  if (matchesKey(d, Key.enter) || d === "\r") {
-    s.step = "edit_model";
-    return { type: "render" };
-  }
-  if (matchesKey(d, Key.up)) {
-    s.compatFieldIdx = Math.max(0, s.compatFieldIdx - 1);
-    return { type: "render" };
-  }
-  if (matchesKey(d, Key.down)) {
-    s.compatFieldIdx = Math.min(fields.length - 1, s.compatFieldIdx + 1);
-    return { type: "render" };
-  }
-  if (current && !("editor" in current) && (matchesKey(d, Key.left) || matchesKey(d, Key.right))) {
-    const currentIndex = Math.max(
-      0,
-      current.values.findIndex((v) => v === s.compatDraft[current.key]),
-    );
-    const direction = matchesKey(d, Key.right) ? 1 : -1;
-    const value = current.values[(currentIndex + direction + current.values.length) % current.values.length];
-    if (value === undefined) delete s.compatDraft[current.key];
-    else s.compatDraft[current.key] = value;
     s.modelPresetLabel = "Custom";
     return autosaveEditedModel(s);
   }
-  return null;
-}
-
-function hCompatJson(s: WizardState, d: string): WizardAction | null {
-  const current = compatControls(s.apiType)[s.compatFieldIdx];
-  if (!current || !("editor" in current)) {
-    s.step = "edit_compat";
-    return { type: "render" };
-  }
   if (matchesKey(d, Key.enter) || d === "\r") {
-    if (!applyCompatJsonDraft(s, current, true)) return { type: "render" };
-    s.step = "edit_compat";
+    if (!applyCompatJsonDraft(s, true)) return { type: "render" };
+    s.step = "edit_model";
+    s.modelPresetLabel = "Custom";
     return autosaveEditedModel(s);
   }
   s.compatJsonError = "";
   const action = ed(s, "compatJsonDraft", d);
-  if (!action) return null;
-  return applyCompatJsonDraft(s, current, false) ? autosaveEditedModel(s) : action;
+  if (action) s.modelPresetLabel = "Custom";
+  return action;
 }
 
-function applyCompatJsonDraft(s: WizardState, current: CompatJsonControl, showError: boolean): boolean {
+function applyCompatJsonDraft(s: WizardState, showError: boolean): boolean {
   const input = s.compatJsonDraft.trim();
   if (!input) {
-    delete s.compatDraft[current.key];
+    s.compatDraft = {};
   } else {
     try {
       const value: unknown = JSON.parse(input);
       if (!isRecord(value)) throw new Error("Value must be a JSON object");
-      s.compatDraft[current.key] = value;
+      s.compatDraft = value;
     } catch (error) {
       if (showError) s.compatJsonError = error instanceof Error ? error.message : "Invalid JSON object";
       return false;
@@ -1022,7 +878,6 @@ function applyCompatJsonDraft(s: WizardState, current: CompatJsonControl, showEr
 }
 
 function openModelPresetPicker(s: WizardState): WizardAction {
-  s.modelPresetBackStep = s.step === "edit_compat" ? "edit_compat" : "edit_model";
   s.modelPresetCursor = 0;
   s.modelPresetFilter = "";
   s.modelPresetFiltering = false;
@@ -1149,17 +1004,16 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 function hApi(s: WizardState, d: string): WizardAction | null {
   if (matchesKey(d, Key.up)) {
-    s.apiTypeIdx = Math.max(0, s.apiTypeIdx - 1);
-    s.apiType = APIS[s.apiTypeIdx];
+    moveSetupApi(s, -1);
     return { type: "render" };
   }
   if (matchesKey(d, Key.down)) {
-    s.apiTypeIdx = Math.min(APIS.length - 1, s.apiTypeIdx + 1);
-    s.apiType = APIS[s.apiTypeIdx];
+    moveSetupApi(s, 1);
     return { type: "render" };
   }
   if (matchesKey(d, Key.enter) || d === "\r") {
     s.step = "base_url";
+    confirmSetupApi(s);
     return { type: "render" };
   }
   return null;
@@ -1171,17 +1025,71 @@ function hUrl(s: WizardState, d: string): WizardAction | null {
       s.statusType = "error";
       return { type: "render" };
     }
-    s.step = "api_key";
+    s.step = "provider_id";
     s.statusMessage = "";
     return { type: "render" };
   }
   return ed(s, "baseUrl", d);
 }
-function hKey(s: WizardState, d: string): WizardAction | null {
+function hOAuthProvider(s: WizardState, d: string): WizardAction | null {
+  if (matchesKey(d, Key.up) || matchesKey(d, Key.left)) {
+    moveSetupOAuthProvider(s, -1);
+    return { type: "render" };
+  }
+  if (matchesKey(d, Key.down) || matchesKey(d, Key.right)) {
+    moveSetupOAuthProvider(s, 1);
+    return { type: "render" };
+  }
   if (matchesKey(d, Key.tab) || matchesKey(d, Key.enter) || d === "\r") {
-    s.step = "provider_id";
+    const selected = selectedSetupOAuthProvider(s);
+    setSetupOAuthProvider(s, selected);
+    s.step = selected === "none" ? "api_key" : "oauth_json_path";
     s.statusMessage = "";
     return { type: "render" };
+  }
+  return null;
+}
+function hOAuthJsonPath(s: WizardState, d: string): WizardAction | null {
+  if (matchesKey(d, Key.tab) || matchesKey(d, Key.enter) || d === "\r") {
+    if (!s.providerId.trim()) {
+      s.step = "provider_id";
+      s.statusMessage = "Provider ID is required before OAuth login.";
+      s.statusType = "error";
+      return { type: "render" };
+    }
+    const shouldUseStoredOAuth = !s.oauthJsonPath.trim() && !s.oauthJsonRaw.trim();
+    s.discoveryLoading = true;
+    s.discoveryStatus = shouldUseStoredOAuth ? "Checking OAuth..." : "Contacting API...";
+    s.step = "discovering";
+    s.statusMessage = "";
+    return { type: "discover" };
+  }
+  if (matchesKey(d, Key.backspace) && s.oauthJsonRaw) {
+    s.oauthJsonRaw = "";
+    s.statusMessage = "";
+    return { type: "render" };
+  }
+  const clean = cleanTextInput(d);
+  if (!clean) return ed(s, "oauthJsonPath", d);
+  const next = s.oauthJsonPath + clean;
+  if (looksLikeOAuthJsonText(next)) {
+    s.oauthJsonRaw = next.trim();
+    s.oauthJsonPath = "";
+    s.statusMessage = "OAuth JSON pasted. It will be imported into Pi auth.json.";
+    s.statusType = "success";
+    return { type: "render" };
+  }
+  s.oauthJsonRaw = "";
+  s.oauthJsonPath = next;
+  return { type: "render" };
+}
+function hKey(s: WizardState, d: string): WizardAction | null {
+  if (matchesKey(d, Key.tab) || matchesKey(d, Key.enter) || d === "\r") {
+    s.discoveryLoading = true;
+    s.discoveryStatus = "Contacting API...";
+    s.step = "discovering";
+    s.statusMessage = "";
+    return { type: "discover" };
   }
   return ed(s, "apiKey", d);
 }
@@ -1192,17 +1100,51 @@ function hPid(s: WizardState, d: string): WizardAction | null {
       s.statusType = "error";
       return { type: "render" };
     }
-    s.discoveryLoading = true;
-    s.discoveryStatus = "Contacting API...";
-    s.step = "discovering";
+    s.step = "oauth_provider";
     s.statusMessage = "";
-    return { type: "discover" };
+    return { type: "render" };
   }
   return ed(s, "providerId", d);
 }
 
 function hCfg(s: WizardState, d: string): WizardAction | null {
+  if (s.mfEditing) {
+    if (matchesKey(d, Key.escape)) {
+      s.mfEditing = false;
+      s.mfEditValue = "";
+      s.statusMessage = "";
+      return { type: "render" };
+    }
+    if (matchesKey(d, Key.tab) || matchesKey(d, Key.enter) || d === "\r") {
+      commitManageTextField(s);
+      s.mfEditing = false;
+      s.mfEditValue = "";
+      return { type: "save_config" };
+    }
+    if (d === "\x15") {
+      s.mfEditValue = "";
+      return { type: "render" };
+    }
+    const clean = cleanTextInput(d);
+    const field = manageTextField(s.mfIdx);
+    if (field === "mfOAuthJsonPath" && clean && looksLikeOAuthJsonText(s.mfEditValue + clean)) {
+      s.mfOAuthJsonRaw = (s.mfEditValue + clean).trim();
+      s.mfOAuthJsonPath = "";
+      s.mfEditing = false;
+      s.mfEditValue = "";
+      s.statusMessage = "OAuth JSON pasted. It will be imported into Pi auth.json.";
+      s.statusType = "success";
+      return { type: "save_config" };
+    }
+    return ed(s, "mfEditValue", d);
+  }
   if (matchesKey(d, Key.tab) || matchesKey(d, Key.enter) || d === "\r") {
+    if (manageTextField(s.mfIdx)) {
+      s.mfEditing = true;
+      s.mfEditValue = getManageTextValue(s, s.mfIdx);
+      s.statusMessage = "";
+      return { type: "render" };
+    }
     if (s.providerOriginalId) s.providerId = s.providerOriginalId;
     s.step = "select_models";
     return { type: "render" };
@@ -1212,19 +1154,26 @@ function hCfg(s: WizardState, d: string): WizardAction | null {
     return { type: "render" };
   }
   if (matchesKey(d, Key.down)) {
-    s.mfIdx = Math.min(9, s.mfIdx + 1);
+    s.mfIdx = Math.min(8, s.mfIdx + 1);
     return { type: "render" };
   }
   const TG: Record<number, { get: () => number; set: (v: number) => void; max: number }> = {
     2: {
       get: () => s.apiTypeIdx,
       set: (v) => {
-        s.apiTypeIdx = v;
-        s.apiType = APIS[v];
+        setManagedApiChoice(s, v);
       },
-      max: APIS.length - 1,
+      max: API_CHOICES.length - 1,
     },
     5: {
+      get: () => Math.max(0, oauthProviderChoicesForApi(s.apiType).indexOf(selectedManagedOAuthProvider(s))),
+      set: (v) => {
+        const current = Math.max(0, oauthProviderChoicesForApi(s.apiType).indexOf(selectedManagedOAuthProvider(s)));
+        moveManagedOAuthProvider(s, v - current);
+      },
+      max: oauthProviderChoicesForApi(s.apiType).length - 1,
+    },
+    7: {
       get: () => s.mfAuth,
       set: (v) => {
         s.mfAuth = v;
@@ -1232,33 +1181,70 @@ function hCfg(s: WizardState, d: string): WizardAction | null {
       max: 2,
     },
   };
-  const compat = providerCompatKeys(s.apiType);
-  if (compat.developerRole) TG[6] = { get: () => s.mfDevRole, set: (v) => (s.mfDevRole = v), max: 2 };
-  if (compat.reasoningEffort) TG[7] = { get: () => s.mfReasonEffort, set: (v) => (s.mfReasonEffort = v), max: 2 };
-  if (compat.strict) TG[8] = { get: () => s.mfStrict, set: (v) => (s.mfStrict = v), max: 2 };
   const t = TG[s.mfIdx];
   if (t && (matchesKey(d, Key.left) || matchesKey(d, Key.right))) {
     const dir = matchesKey(d, Key.right) ? 1 : -1;
     t.set((((t.get() + dir) % (t.max + 1)) + (t.max + 1)) % (t.max + 1));
     return { type: "save_config" };
   }
-  const TX: Record<number, TextField> = {
+  if (manageTextField(s.mfIdx)) {
+    const clean = cleanTextInput(d);
+    if (clean) {
+      if (s.mfIdx === 6 && looksLikeOAuthJsonText(clean)) {
+        s.mfOAuthJsonRaw = clean.trim();
+        s.mfOAuthJsonPath = "";
+        s.statusMessage = "OAuth JSON pasted. It will be imported into Pi auth.json.";
+        s.statusType = "success";
+        return { type: "save_config" };
+      }
+      s.mfEditing = true;
+      s.mfEditValue = getManageTextValue(s, s.mfIdx) + clean;
+      return { type: "render" };
+    }
+  }
+  return null;
+}
+
+function manageTextField(index: number): TextField | undefined {
+  const fields: Record<number, TextField> = {
     0: "providerId",
     1: "providerName",
     3: "baseUrl",
     4: "apiKey",
-    9: "mfHeaders",
+    6: "mfOAuthJsonPath",
+    8: "mfHeaders",
   };
-  if (TX[s.mfIdx] && ed(s, TX[s.mfIdx], d)) return { type: "save_config" };
-  return null;
+  return fields[index];
+}
+
+function getManageTextValue(s: WizardState, index: number): string {
+  const field = manageTextField(index);
+  return field ? String((s as any)[field] || "") : "";
+}
+
+function commitManageTextField(s: WizardState): void {
+  const field = manageTextField(s.mfIdx);
+  if (!field) return;
+  if (field === "mfOAuthJsonPath" && looksLikeOAuthJsonText(s.mfEditValue)) {
+    s.mfOAuthJsonRaw = s.mfEditValue.trim();
+    s.mfOAuthJsonPath = "";
+    s.statusMessage = "OAuth JSON pasted. It will be imported into Pi auth.json.";
+    s.statusType = "success";
+    return;
+  }
+  if (field === "mfOAuthJsonPath") s.mfOAuthJsonRaw = "";
+  (s as any)[field] = s.mfEditValue;
 }
 
 type TextField =
   | "baseUrl"
   | "apiKey"
+  | "oauthJsonPath"
   | "providerId"
   | "providerName"
+  | "mfOAuthJsonPath"
   | "mfHeaders"
+  | "mfEditValue"
   | "editContextWindow"
   | "editMaxTokens"
   | "editCostInput"
@@ -1273,10 +1259,19 @@ function ed(s: WizardState, f: TextField, d: string): WizardAction | null {
     (s as any)[f] = (s as any)[f].slice(0, -1);
     return { type: "render" };
   }
-  const clean = d.replace(/\x1b\[[0-9;]*[~a-zA-Z]/g, "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+  const clean = cleanTextInput(d);
   if (clean) {
     (s as any)[f] += clean;
     return { type: "render" };
   }
   return null;
+}
+
+function cleanTextInput(d: string): string {
+  return d.replace(/\x1b\[[0-9;]*[~a-zA-Z]/g, "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+}
+
+function oauthJsonDisplay(pathValue: string, rawValue: string, empty = "(empty)"): string {
+  if (rawValue) return "(pasted OAuth JSON)";
+  return pathValue || empty;
 }

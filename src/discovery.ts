@@ -1,16 +1,32 @@
 // Model discovery — native API calls + models.dev catalog fallback
-import type { DiscoveredModel, ProviderConfig, ModelCost, ThinkingLevelMap } from "./types";
+import type { DiscoveredModel, ProviderConfig } from "./types";
 import { usesAuthHeader } from "./types";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, ModelCost, ThinkingLevelMap } from "@earendil-works/pi-ai";
 
 const CATALOG_URL = "https://models.dev/api.json";
 const TIMEOUT_MS = 15_000;
+const CODEX_CLIENT_VERSION = "0.144.1";
+const CODEX_ORIGINATOR = "codex_cli_rs";
 
 // ─── External API response types ─────────────────────────────────
 
 interface OpenAIModelsResp {
   data?: Array<{ id: string }>;
+}
+interface CodexModelsResp {
+  models?: Array<{
+    slug?: string;
+    id?: string;
+    display_name?: string;
+    name?: string;
+    context_window?: number;
+    context_length?: number;
+    max_context_window?: number;
+    max_completion_tokens?: number;
+    max_tokens?: number;
+    input_modalities?: string[];
+  }>;
 }
 interface OllamaTagsResp {
   models?: Array<{ name: string; model: string }>;
@@ -64,12 +80,13 @@ interface VertexModelsResp {
   models?: VertexModelResp[];
 }
 
-interface CatalogProv {
+// Raw response shape from https://models.dev/api.json. pi-ai's exported Model type is the normalized output shape.
+interface ModelsDevProvider {
   id?: string;
   name?: string;
-  models: Record<string, CatalogMod>;
+  models: Record<string, ModelsDevModel>;
 }
-interface CatalogMod {
+interface ModelsDevModel {
   id?: string;
   name?: string;
   reasoning?: boolean;
@@ -97,7 +114,7 @@ interface HealthEndpoint {
 
 interface RecommendationModel extends DiscoveredModel {
   reasoning: boolean;
-  input: string[];
+  input: Model<Api>["input"];
   contextWindow: number;
   maxTokens: number;
   catalogApi?: string;
@@ -124,7 +141,7 @@ interface RecommendationIndex {
 
 export interface ModelPresetModel extends DiscoveredModel {
   reasoning: boolean;
-  input: string[];
+  input: Model<Api>["input"];
   contextWindow: number;
   maxTokens: number;
 }
@@ -158,6 +175,18 @@ export async function discoverModels(
   throw new Error(
     `No models discovered for "${providerId}". Check the URL, API key, and network connectivity.${nativeError}`,
   );
+}
+
+export async function discoverCodexOAuthModels(
+  providerId: string,
+  provider: ProviderConfig,
+  accessToken: string,
+  accountId?: string,
+): Promise<DiscoveredModel[]> {
+  const [native, catalog] = await Promise.all([discoverCodexModels(provider.baseUrl, accessToken, accountId), loadCatalog()]);
+  const models = recommendModels(native, providerId, provider, catalog).filter((model) => model.suggestedBy !== "base-url");
+  if (models.length > 0) return models;
+  throw new Error(`No models returned by "${providerId}" Codex API.`);
 }
 
 /** Look up metadata for a manually entered model id without contacting the provider's model endpoint. */
@@ -197,6 +226,38 @@ async function discoverOpenAI(baseUrl: string, apiKey: string): Promise<Discover
   return (r?.data || []).filter((m) => m.id?.trim()).map((m) => ({ id: m.id.trim(), name: m.id.trim() }));
 }
 
+async function discoverCodexModels(baseUrl: string, accessToken: string, accountId?: string): Promise<DiscoveredModel[]> {
+  const endpoint = codexModelsEndpoint(baseUrl);
+  const headers: Record<string, string> = {
+    ...bearer(accessToken),
+    Accept: "application/json",
+    Originator: CODEX_ORIGINATOR,
+    "User-Agent": `${CODEX_ORIGINATOR}/${CODEX_CLIENT_VERSION}`,
+  };
+  if (accountId?.trim()) headers["Chatgpt-Account-Id"] = accountId.trim();
+  const r = await get<CodexModelsResp>(endpoint, headers);
+  const models: DiscoveredModel[] = [];
+  for (const model of r?.models || []) {
+    const id = (model.slug || model.id || "").trim();
+    if (!id) continue;
+    models.push({
+      id,
+      name: model.display_name || model.name || id,
+      contextWindow: model.context_window || model.context_length || model.max_context_window,
+      maxTokens: model.max_completion_tokens || model.max_tokens,
+      input: inputFilter(model.input_modalities),
+      suggestedBy: "api",
+    });
+  }
+  return models;
+}
+
+function codexModelsEndpoint(baseUrl: string): string {
+  const root = baseUrl.replace(/\/$/, "");
+  const prefix = root.endsWith("/codex") ? root : `${root}/codex`;
+  return `${prefix}/models?client_version=${CODEX_CLIENT_VERSION}`;
+}
+
 // ─── Anthropic ───────────────────────────────────────────────────
 
 async function discoverAnthropic(baseUrl: string, apiKey: string): Promise<DiscoveredModel[]> {
@@ -208,7 +269,7 @@ async function discoverAnthropic(baseUrl: string, apiKey: string): Promise<Disco
   return (r?.data || [])
     .filter((m) => m.id?.trim())
     .map((m) => {
-      const input = ["text"];
+      const input: Model<Api>["input"] = ["text"];
       if (m.capabilities?.image_input?.supported) input.push("image");
       const tlm = buildAnthropicThinking(m.capabilities?.effort);
       return {
@@ -250,7 +311,7 @@ async function discoverGemini(baseUrl: string, apiKey: string): Promise<Discover
       id: (m.baseModelId || m.name).replace(/^models\//, ""),
       name: m.displayName || m.baseModelId || m.name,
       reasoning: !!m.thinking,
-      input: ["text", "image"],
+      input: inputFilter(["text", "image"]),
       contextWindow: m.inputTokenLimit || 128000,
       maxTokens: m.outputTokenLimit || 8192,
     }))
@@ -281,7 +342,7 @@ async function discoverVertex(baseUrl: string, apiKey: string): Promise<Discover
         id: m.name.replace(/^publishers\/google\/models\//, ""),
         name: m.displayName || m.name,
         reasoning: !!m.thinking,
-        input: ["text", "image"],
+        input: inputFilter(["text", "image"]),
         contextWindow: m.inputTokenLimit || 128000,
         maxTokens: m.outputTokenLimit || 8192,
       }))
@@ -293,9 +354,9 @@ async function discoverVertex(baseUrl: string, apiKey: string): Promise<Discover
 
 // ─── Recommendations: model id first, then base URL ─────────────
 
-async function loadCatalog(): Promise<Record<string, CatalogProv>> {
+async function loadCatalog(): Promise<Record<string, ModelsDevProvider>> {
   try {
-    return (await get<Record<string, CatalogProv>>(CATALOG_URL)) || {};
+    return (await get<Record<string, ModelsDevProvider>>(CATALOG_URL)) || {};
   } catch {
     return {};
   }
@@ -371,7 +432,7 @@ export function recommendModels(
   native: DiscoveredModel[],
   providerId: string,
   provider: ProviderConfig,
-  catalog: Record<string, CatalogProv> = {},
+  catalog: Record<string, ModelsDevProvider> = {},
 ): DiscoveredModel[] {
   const index = buildRecommendationIndex(catalog);
   const result = native.map((model) => {
@@ -397,7 +458,7 @@ export function recommendModels(
   return result;
 }
 
-function buildRecommendationIndex(catalog: Record<string, CatalogProv>): RecommendationIndex {
+function buildRecommendationIndex(catalog: Record<string, ModelsDevProvider>): RecommendationIndex {
   const providers = [...getPiRecommendations(), ...fromRemoteCatalog(catalog)];
   const exact = new Map<string, IndexedRecommendation[]>(),
     leaf = new Map<string, IndexedRecommendation[]>();
@@ -416,7 +477,7 @@ function addToIndex(index: Map<string, IndexedRecommendation[]>, key: string, va
   else index.set(key, [value]);
 }
 
-function fromRemoteCatalog(catalog: Record<string, CatalogProv>): RecommendationProvider[] {
+function fromRemoteCatalog(catalog: Record<string, ModelsDevProvider>): RecommendationProvider[] {
   return Object.entries(catalog).map(([key, provider]) => ({
     id: provider.id || key,
     name: provider.name || provider.id || key,
@@ -484,7 +545,7 @@ function fromPiModel(model: Model<Api>): RecommendationModel {
   };
 }
 
-function fromCatalogModel(key: string, model: CatalogMod): RecommendationModel {
+function fromCatalogModel(key: string, model: ModelsDevModel): RecommendationModel {
   const id = (model.id || key).trim();
   return {
     id,
@@ -693,12 +754,12 @@ function baseUrlIdentityScore(baseUrl: string, identity: string): number {
   const candidate = norm(identity);
   return candidate.length >= 3 && norm(baseUrl).includes(candidate) ? candidate.length : 0;
 }
-function inputFilter(input?: string[]): string[] {
+function inputFilter(input?: string[]): Model<Api>["input"] {
   const r = (input || []).filter((v) => v === "text" || v === "image");
   return r.length ? [...new Set(r)] : ["text"];
 }
 
-export function toModelCost(c?: CatalogMod["cost"]): ModelCost | undefined {
+export function toModelCost(c?: ModelsDevModel["cost"]): ModelCost | undefined {
   if (!c) return;
   const value = (n: number | undefined) => (typeof n === "number" && Number.isFinite(n) ? n : 0);
   const cost: ModelCost = {

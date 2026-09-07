@@ -1,92 +1,34 @@
 // Types for pi-custom-provider — imports from pi, only extension-specific types here
-import type { KnownApi, ThinkingLevelMap, ModelCost } from "@earendil-works/pi-ai";
-
-export type { ThinkingLevelMap, ModelCost };
-export type ModelAPI = Exclude<KnownApi, "pi-messages">;
+import type { Api, KnownApi, KnownProvider, Model } from "@earendil-works/pi-ai";
 
 // ─── API-type predicates ─────────────────────────────────────────
 
 /** APIs using Authorization: Bearer header (= OpenAI-compatible subset) */
-export function usesAuthHeader(api: ModelAPI): boolean {
+export function usesAuthHeader(api: KnownApi): boolean {
   return api.startsWith("openai") || api === "mistral-conversations";
-}
-
-export interface ProviderCompatKeys {
-  developerRole?: "supportsDeveloperRole";
-  reasoningEffort?: "supportsReasoningEffort";
-  strict?: "supportsStrictMode" | "supportsStrictTools";
-}
-
-export interface ProviderCompatState {
-  developerRole: number;
-  reasoningEffort: number;
-  strict: number;
-}
-
-const MANAGED_PROVIDER_COMPAT = [
-  "supportsDeveloperRole",
-  "supportsReasoningEffort",
-  "supportsStrictMode",
-  "supportsStrictTools",
-] as const;
-
-/** Provider-level compat fields accepted by each pi-ai API implementation. */
-export function providerCompatKeys(api: ModelAPI): ProviderCompatKeys {
-  if (api === "openai-completions") {
-    return {
-      developerRole: "supportsDeveloperRole",
-      reasoningEffort: "supportsReasoningEffort",
-      strict: "supportsStrictMode",
-    };
-  }
-  if (api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses") {
-    return { developerRole: "supportsDeveloperRole", strict: "supportsStrictMode" };
-  }
-  if (api === "anthropic-messages") return { strict: "supportsStrictTools" };
-  if (api === "bedrock-converse-stream") return { strict: "supportsStrictMode" };
-  return {};
-}
-
-/** Merge UI overrides without discarding compat fields managed by pi-ai or newer plugin versions. */
-export function mergeProviderCompat(
-  existing: Record<string, unknown> | undefined,
-  api: ModelAPI,
-  state: ProviderCompatState,
-): Record<string, unknown> | undefined {
-  const compat: Record<string, unknown> = { ...(existing || {}) };
-  for (const key of MANAGED_PROVIDER_COMPAT) delete compat[key];
-  const keys = providerCompatKeys(api);
-  setTriState(compat, keys.developerRole, state.developerRole);
-  setTriState(compat, keys.reasoningEffort, state.reasoningEffort);
-  setTriState(compat, keys.strict, state.strict);
-  return Object.keys(compat).length ? compat : undefined;
-}
-
-function setTriState(target: Record<string, unknown>, key: string | undefined, value: number): void {
-  if (!key || value === 0) return;
-  target[key] = value === 1;
 }
 
 // ─── models.json config types ────────────────────────────────────
 
-export interface ModelConfig {
+export interface ModelConfig
+  extends Partial<
+    Pick<Model<Api>, "baseUrl" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens" | "cost" | "headers">
+  > {
   id: string;
   name?: string;
-  api?: ModelAPI;
-  reasoning?: boolean;
-  thinkingLevelMap?: ThinkingLevelMap;
-  input?: string[];
-  contextWindow?: number;
-  maxTokens?: number;
-  cost?: ModelCost;
+  api?: KnownApi;
   compat?: Record<string, unknown>;
 }
 
 export interface ProviderConfig {
   name?: string;
   baseUrl: string;
-  api: ModelAPI;
+  api: KnownApi;
   apiKey?: string;
+  /** Plugin-owned OAuth flow. Do not use models.json's built-in `oauth` field; Pi only accepts it for Radius. */
+  oauthProvider?: KnownProvider;
+  /** Optional OAuth credential JSON path. Empty means use the provider ID's stored Pi OAuth credential. */
+  oauthJsonPath?: string;
   headers?: Record<string, string>;
   authHeader?: boolean;
   compat?: Record<string, unknown>;

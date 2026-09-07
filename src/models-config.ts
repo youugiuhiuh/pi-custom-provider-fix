@@ -21,7 +21,7 @@ export function readConfig(): ModelsConfig {
     const configPath = modelsConfigPath();
     if (!fs.existsSync(configPath)) return { providers: {} };
     const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    return config?.providers ? (config as ModelsConfig) : { providers: {} };
+    return config?.providers ? sanitizeConfig(config as ModelsConfig) : { providers: {} };
   } catch {
     return { providers: {} };
   }
@@ -31,7 +31,18 @@ export function writeConfig(config: ModelsConfig): void {
   const configPath = modelsConfigPath();
   const dir = path.dirname(configPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+  fs.writeFileSync(configPath, JSON.stringify(sanitizeConfig(config), null, 2) + "\n", "utf-8");
+}
+
+export function repairConfig(): ModelsConfig {
+  const configPath = modelsConfigPath();
+  const config = readConfig();
+  try {
+    if (!fs.existsSync(configPath)) return config;
+    const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    if (JSON.stringify(parsed) !== JSON.stringify(config)) writeConfig(config);
+  } catch {}
+  return config;
 }
 
 export function addProvider(config: ModelsConfig, id: string, provider: ProviderConfig): ModelsConfig {
@@ -70,11 +81,13 @@ export function mergeSelectedModels(existing: ModelConfig[], candidates: Selecta
         ...model,
         id: model.id,
         name: candidate.name !== candidate.id ? candidate.name : model.name,
+        baseUrl: candidate.baseUrl ?? model.baseUrl,
         reasoning: candidate.reasoning,
         input: candidate.input,
         contextWindow: candidate.contextWindow,
         maxTokens: candidate.maxTokens,
         cost: candidate.cost,
+        headers: candidate.headers ?? model.headers,
         thinkingLevelMap: candidate.thinkingLevelMap,
         compat: candidate.compat,
       },
@@ -102,5 +115,32 @@ export function exportConfig(config: ModelsConfig): string {
 export function importConfig(json: string): ModelsConfig {
   const parsed = JSON.parse(json);
   if (!parsed?.providers) throw new Error("Invalid format: missing 'providers'");
-  return parsed as ModelsConfig;
+  return sanitizeConfig(parsed as ModelsConfig);
+}
+
+function sanitizeConfig(config: ModelsConfig): ModelsConfig {
+  const providers: ModelsConfig["providers"] = {};
+  for (const [id, provider] of Object.entries(config.providers || {})) {
+    providers[id] = sanitizeProvider(provider);
+  }
+  return { providers };
+}
+
+function sanitizeProvider(provider: ProviderConfig): ProviderConfig {
+  const next: ProviderConfig = { ...provider };
+  if (!next.apiKey?.trim()) delete next.apiKey;
+  if (next.oauthProvider) delete next.apiKey;
+  if (!next.oauthProvider && !next.apiKey?.trim()) next.authHeader = false;
+  if (!next.oauthJsonPath?.trim()) delete next.oauthJsonPath;
+  if (!next.name?.trim()) delete next.name;
+  next.models = (next.models || []).map(sanitizeModel);
+  return next;
+}
+
+function sanitizeModel(model: ModelConfig): ModelConfig {
+  const next: ModelConfig = { ...model };
+  if (!next.name?.trim()) delete next.name;
+  if (!next.api?.trim()) delete next.api;
+  if (!next.baseUrl?.trim()) delete next.baseUrl;
+  return next;
 }
