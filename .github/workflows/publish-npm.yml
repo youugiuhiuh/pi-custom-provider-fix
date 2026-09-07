@@ -60,5 +60,8 @@ jobs:
       - name: Check package contents
         run: pnpm run pack:check
 
+      - name: Update npm CLI
+        run: npm install --global npm@latest
+
       - name: Publish to npm
         run: npm publish --access public --provenance
