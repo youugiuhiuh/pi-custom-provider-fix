@@ -10,7 +10,10 @@
     "llm",
     "provider",
     "models",
-    "coding-agent"
+    "coding-agent",
+    "provider-setup",
+    "openai-compatible",
+    "oauth"
   ],
   "license": "MIT",
   "author": "d4rw1nz",
@@ -31,7 +34,8 @@
     "src/provider-registry.ts",
     "src/provider-flow.ts",
     "src/types.ts",
-    "src/wizard.ts"
+    "src/wizard.ts",
+    "assets/cover.png"
   ],
   "scripts": {
     "test": "npx tsx src/test.ts && npx tsx src/e2e.ts",
@@ -44,7 +48,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/d4rw1nz/pi-custom-provider/main/assets/cover.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
