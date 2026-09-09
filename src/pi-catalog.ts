@@ -1,6 +1,8 @@
-import type { Api, KnownApi, KnownProvider, Model, Provider } from "@earendil-works/pi-ai";
+import type { Api, KnownApi, KnownProvider, Provider } from "@earendil-works/pi-ai";
 import * as providerCatalog from "@earendil-works/pi-ai/providers/all";
-import { DEFAULT_RADIUS_GATEWAY, getRadiusModelsFromConfig } from "@earendil-works/pi-ai/providers/radius-config";
+
+const RADIUS_API = "pi-messages" as KnownApi;
+const DEFAULT_RADIUS_GATEWAY = "https://radius.pi.dev";
 
 export const API_CHOICES: KnownApi[] = loadApiChoices();
 export const OAUTH_PROVIDER_CHOICES: Array<KnownProvider | "none"> = ["none", ...loadOAuthProviderChoices()];
@@ -95,35 +97,16 @@ function loadApiChoices(): KnownApi[] {
       if (typeof model.api === "string") seen.add(model.api as KnownApi);
     }
   }
-  const radiusModel = probeRadiusModel();
-  if (radiusModel) seen.add(radiusModel.api as KnownApi);
+  seen.add(RADIUS_API);
   return [...seen];
 }
 
 function dynamicOAuthProviderApi(provider: KnownProvider): KnownApi | undefined {
-  if (provider !== "radius") return undefined;
-  return probeRadiusModel()?.api as KnownApi | undefined;
+  return provider === "radius" ? RADIUS_API : undefined;
 }
 
 function dynamicOAuthProviderBaseUrl(provider: KnownProvider): string | undefined {
   return provider === "radius" ? DEFAULT_RADIUS_GATEWAY : undefined;
-}
-
-function probeRadiusModel(): Model<"pi-messages"> | undefined {
-  return getRadiusModelsFromConfig("__probe__", {
-    baseUrl: "",
-    models: [
-      {
-        id: "__probe__",
-        name: "__probe__",
-        reasoning: false,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 1,
-        maxTokens: 1,
-      },
-    ],
-  })[0];
 }
 
 function humanizeId(id: string): string {
