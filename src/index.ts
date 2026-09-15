@@ -24,7 +24,7 @@ import {
   replaceProvider,
   mergeSelectedModels,
 } from "./models-config";
-import { discoverCodexOAuthModels, discoverModels, recommendModel } from "./discovery";
+import { discoverCodexOAuthModels, discoverModels, prefetchModelCatalog, recommendModel } from "./discovery";
 import { createWizardState, renderWizard, handleWizardInput } from "./wizard";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -569,6 +569,10 @@ async function run(pi: ExtensionAPI, ctx: ExtensionContext) {
           break;
         case "render":
           refresh();
+          break;
+        case "prefetch_presets":
+          refresh();
+          prefetchModelCatalog().then(refresh, refresh);
           break;
         case "discover":
           s.discoveryLoading = true;

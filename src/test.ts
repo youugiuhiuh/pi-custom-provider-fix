@@ -1,7 +1,7 @@
 // Test wizard state machine — run: npx tsx src/test.ts
 import { createWizardState, renderWizard, handleWizardInput } from "./wizard";
 import { importConfig, mergeSelectedModels, removeProvider, replaceProvider } from "./models-config";
-import { listModelPresets, recommendModels, toModelCost } from "./discovery";
+import { listModelPresets, prefetchModelCatalog, recommendModels, toModelCost } from "./discovery";
 import { importPastedOAuthJson, readOAuthCredential } from "./oauth";
 import { syncConfiguredProviders } from "./provider-registry";
 import { API_CHOICES, OAUTH_PROVIDER_CHOICES, oauthProviderSupportsApi } from "./pi-catalog";
@@ -814,6 +814,15 @@ function assert(cond: boolean, msg: string) {
   const expected = listModelPresets("openai-completions", "360-deepseek-v4-flash", "deepseek-v4-flash")[0];
   assert(!!expected, "the DeepSeek model preset can be filtered");
 
+  // Multi-word filters must match across the "provider / model-id" separator.
+  assert(
+    listModelPresets("openai-completions", "deepseek-v4-flash", "4 flash").length > 0,
+    "multi-word preset filters match across the label separator",
+  );
+  // Region variants are the same model on another endpoint, so they rank as exact matches
+  // against the remote catalog. Asserted at the end of this file, after the local-preset
+  // checks below, because warming the catalog changes which preset ranks first.
+
   const s = createWizardState([]);
   s.step = "select_models";
   s.apiType = "openai-completions";
@@ -1088,6 +1097,27 @@ function assert(cond: boolean, msg: string) {
   assert(value === "manual-code", "OAuth manual fallback can be handled by the wizard");
   assert(customManualCalled, "OAuth manual fallback receives the configured delay");
   assert(!inputCalled, "OAuth manual fallback does not open a nested input dialog inside the wizard");
+}
+
+// ─── Remote catalog: models.dev fills gaps pi-ai does not ship ──
+// Runs last: warming the catalog changes which preset ranks first, so the
+// local-preset assertions above must execute against the cold (bundled) catalog.
+{
+  const cold = listModelPresets("openai-completions", "deepseek-v4.1-flash@eu");
+  await prefetchModelCatalog();
+  const warm = listModelPresets("openai-completions", "deepseek-v4.1-flash@eu");
+  if (warm.length > cold.length) {
+    assert(
+      warm.some((preset) => preset.modelId === "deepseek-v4.1-flash@eu" && preset.recommended),
+      "remote catalog supplies region-suffixed presets with exact-match ranking",
+    );
+    assert(
+      warm.some((preset) => preset.modelId.includes("4.1") && preset.modelId.includes("flash")),
+      "remote catalog exposes models absent from pi-ai (deepseek-v4.1-flash)",
+    );
+  } else {
+    console.log("  SKIP: models.dev catalog unavailable (offline); remote preset lookup not asserted");
+  }
 }
 
 // ─── Result ──────────────────────────────────────────────────────

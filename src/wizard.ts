@@ -466,7 +466,7 @@ function rModelPreset(s: WizardState, w: (t: string) => void, th: Th) {
   const model = s.discoveredModels[s.editingModelIdx],
     choices = modelPresetChoices(s);
   w(th.bold(`  Choose Model Preset: ${model?.id || s.providerId}`));
-  w(th.muted(`  ${s.apiType} · complete model metadata from installed pi-ai`));
+  w(th.muted(`  ${s.apiType} · complete model metadata from pi-ai + models.dev`));
   w("");
   if (!choices.length) {
     w(th.dim("  (no matching presets)"));
@@ -882,7 +882,9 @@ function openModelPresetPicker(s: WizardState): WizardAction {
   s.modelPresetFilter = "";
   s.modelPresetFiltering = false;
   s.step = "model_preset";
-  return { type: "render" };
+  // Presets come from pi-ai's bundled catalog plus models.dev; the fetch is async
+  // and re-renders when it lands, so newer models (e.g. deepseek-v4.1-flash) appear.
+  return { type: "prefetch_presets" };
 }
 
 function hModelPreset(s: WizardState, d: string): WizardAction | null {

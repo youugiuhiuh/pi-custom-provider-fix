@@ -355,11 +355,22 @@ async function discoverVertex(baseUrl: string, apiKey: string): Promise<Discover
 // ─── Recommendations: model id first, then base URL ─────────────
 
 async function loadCatalog(): Promise<Record<string, ModelsDevProvider>> {
-  try {
-    return (await get<Record<string, ModelsDevProvider>>(CATALOG_URL)) || {};
-  } catch {
-    return {};
+  if (catalogCache) return catalogCache;
+  if (!catalogFetch) {
+    catalogFetch = get<Record<string, ModelsDevProvider>>(CATALOG_URL)
+      .then((catalog) => (catalogCache = catalog || {}))
+      .catch(() => ({} as Record<string, ModelsDevProvider>))
+      .finally(() => (catalogFetch = undefined));
   }
+  return catalogFetch;
+}
+
+let catalogCache: Record<string, ModelsDevProvider> | undefined;
+let catalogFetch: Promise<Record<string, ModelsDevProvider>> | undefined;
+
+/** Warm the models.dev catalog so the (synchronous) preset picker can include remote models. */
+export async function prefetchModelCatalog(): Promise<void> {
+  await loadCatalog();
 }
 
 let piRecommendations: RecommendationProvider[] | undefined;
@@ -377,10 +388,12 @@ function getPiRecommendations(): RecommendationProvider[] {
 /** List complete pi-ai model configurations for explicit manual selection. */
 export function listModelPresets(api: ProviderConfig["api"], modelId: string, filter = ""): ModelPreset[] {
   const query = filter.trim().toLowerCase();
-  return getPiRecommendations()
+  return [...getPiRecommendations(), ...fromRemoteCatalog(catalogCache || {})]
     .flatMap((provider) =>
       provider.models
-        .filter((model) => model.catalogApi === api)
+        // models.dev does not declare a wire API, so remote models carry no catalogApi.
+        // Keep them (they are user-selectable presets) and only exclude a known mismatch.
+        .filter((model) => !model.catalogApi || model.catalogApi === api)
         .map((model) => {
           const score = modelPresetScore(modelId, model.id);
           const { catalogApi: _catalogApi, ...presetModel } = model;
@@ -401,7 +414,15 @@ export function listModelPresets(api: ProviderConfig["api"], modelId: string, fi
           };
         }),
     )
-    .filter((preset) => !query || preset.label.toLowerCase().includes(query))
+    .filter((preset) => {
+      if (!query) return true;
+      const hay = preset.label.toLowerCase();
+      if (hay.includes(query)) return true;
+      // Multi-word queries (e.g. "4.1 flash") must all match, since the label
+      // separates provider and id with " / " rather than spaces.
+      const terms = query.split(/\s+/).filter(Boolean);
+      return terms.length > 1 && terms.every((term) => hay.includes(term));
+    })
     .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
     .map(({ score: _score, ...preset }) => preset);
 }
@@ -410,6 +431,11 @@ function modelPresetScore(actual: string, preset: string): number {
   const left = normalizedModelId(actual),
     right = normalizedModelId(preset);
   if (left === right) return 1000;
+  // Region variants ("deepseek-v4.1-flash@eu") are the same model on a different
+  // endpoint, so treat them as an exact match once the suffix is removed.
+  const regionLeft = left.replace(/@[a-z0-9-]+$/i, ""),
+    regionRight = right.replace(/@[a-z0-9-]+$/i, "");
+  if (regionLeft === regionRight) return 950;
   if (modelLeaf(left) === modelLeaf(right)) return 900;
   const compactLeft = norm(left),
     compactRight = norm(right);
