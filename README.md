@@ -20,8 +20,7 @@
 Install the latest published package:
 
 ```bash
-pi install npm:@d4rw1nz/pi-custom-provider
-```
+pi install git:github.com/youugiuhiuh/pi-custom-provider-fix```
 
 Install a pinned version:
 
