@@ -15,7 +15,7 @@
 安装 npm 最新版本：
 
 ```bash
-pi install npm:@d4rw1nz/pi-custom-provider
+pi install git:github.com/youugiuhiuh/pi-custom-provider-fix
 ```
 
 安装指定版本：
