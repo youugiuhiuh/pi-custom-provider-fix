@@ -20,7 +20,8 @@
 Install the latest published package:
 
 ```bash
-pi install git:github.com/youugiuhiuh/pi-custom-provider-fix```
+pi install git:github.com/youugiuhiuh/pi-custom-provider-fix
+```
 
 Install a pinned version:
 
